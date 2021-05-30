@@ -835,6 +835,16 @@ config GPIO_VISCONTI
 	help
 	  Say yes here to support GPIO on Tohisba Visconti.
 
+config GPIO_VITA
+	tristate "PlayStation Vita GPIO support"
+	depends on ARCH_VITA || COMPILE_TEST
+	depends on OF_GPIO
+	select GPIOLIB_IRQCHIP
+	select GPIO_GENERIC
+	select IRQ_DOMAIN_HIERARCHY
+	help
+	  Say yes here to support GPIO on PlayStation Vita.
+
 config GPIO_WAVESHARE_DSI_TOUCH
 	tristate "Waveshare GPIO controller for DSI panels"
 	depends on BACKLIGHT_CLASS_DEVICE

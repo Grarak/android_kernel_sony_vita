@@ -1279,6 +1279,12 @@ config SPI_VIRTIO
 	  This driver can also be built as a module. If so, the module
 	  will be called spi-virtio.
 
+config SPI_VITA
+	tristate "PlayStation Vita SPI controller"
+	depends on ARCH_VITA || COMPILE_TEST
+	help
+	  SPI driver for the PlayStation Vita.
+
 config SPI_XCOMM
 	tristate "Analog Devices AD-FMCOMMS1-EBZ SPI-I2C-bridge driver"
 	depends on I2C
