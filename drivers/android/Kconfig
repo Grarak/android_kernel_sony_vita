@@ -1,6 +1,17 @@
 # SPDX-License-Identifier: GPL-2.0
 menu "Android"
 
+config ASHMEM
+	bool "Android anonymous shared memory (ashmem, legacy)"
+	depends on SHMEM && MMU
+	help
+	  The ashmem subsystem is a new shared memory allocator, similar to
+	  POSIX SHM but with different behavior and sporting a simpler
+	  file-based API. It was removed from mainline in 5.18 in favour of
+	  memfd; say Y here only for Android userspace older than Android 10
+	  (e.g. LineageOS 15.1 / Android 8.1), whose libcutils needs
+	  /dev/ashmem.
+
 config ANDROID_BINDER_IPC
 	bool "Android Binder IPC Driver"
 	depends on MMU

@@ -5,3 +5,4 @@ obj-$(CONFIG_ANDROID_BINDERFS)		+= binderfs.o
 obj-$(CONFIG_ANDROID_BINDER_IPC)	+= binder.o binder_alloc.o binder_netlink.o
 obj-$(CONFIG_ANDROID_BINDER_ALLOC_KUNIT_TEST)	+= tests/
 obj-$(CONFIG_ANDROID_BINDER_IPC_RUST)	+= binder/
+obj-$(CONFIG_ASHMEM)			+= ashmem.o
