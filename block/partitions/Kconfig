@@ -118,6 +118,13 @@ config MAC_PARTITION
 	  Say Y here if you would like to use hard disks under Linux which
 	  were partitioned on a Macintosh.
 
+config SCE_PARTITION
+	bool "Sony PlayStation Vita (SCE master block) partition support" if PARTITION_ADVANCED
+	default y if ARCH_VITA
+	help
+	  Say Y here to read the partition table Sony's PlayStation Vita
+	  keeps in the first block of its memory card, eMMC and game cards.
+
 config MSDOS_PARTITION
 	bool "PC BIOS (MSDOS partition tables) support" if PARTITION_ADVANCED
 	default y
