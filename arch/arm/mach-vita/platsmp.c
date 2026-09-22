@@ -23,7 +23,7 @@
 
 #define SECONDARY_STARTUP_ADDR	0x1F007F00
 
-int vita_smp_boot_secondary(unsigned int cpu, struct task_struct *idle)
+static int vita_smp_boot_secondary(unsigned int cpu, struct task_struct *idle)
 {
 	void __iomem *boot_addr;
 	const u32 secondary_boot_addr = SECONDARY_STARTUP_ADDR + cpu * 4;
