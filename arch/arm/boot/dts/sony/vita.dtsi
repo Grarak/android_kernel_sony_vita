@@ -206,9 +206,16 @@
 		 * vendor 0x89) with the register block mirrored every 0x100
 		 * [WIKI SDIF_Registers]. Pervasive reset bits at
 		 * +0xA0..+0xAC [WIKI Pervasive]: indices 40..43.
+		 *
+		 * clock-frequency is the SD base clock. It is not documented;
+		 * 102.4 MHz is an upper bound. libbaremetal identifies cards with
+		 * SDHCI divider 128 (base/256), which must be <= 400 kHz. Assuming
+		 * the upper bound keeps every real SD clock at or below the
+		 * requested one. TODO: measure the base clock.
 		 */
 		sdif0: mmc@e0b00000 {
 			compatible = "vita,sdhci";
+			clock-frequency = <102400000>;
 			reg = <0xe0b00000 0x100>;
 			interrupts = <GIC_SPI 188 IRQ_TYPE_LEVEL_HIGH>;	/* ID 220 */
 			resets = <&reset 40>;
@@ -224,6 +231,7 @@
 		/* Game card slot: an SD2Vita adapter makes it a microSD slot */
 		sdif1: mmc@e0c00000 {
 			compatible = "vita,sdhci";
+			clock-frequency = <102400000>;
 			reg = <0xe0c00000 0x100>;
 			interrupts = <GIC_SPI 189 IRQ_TYPE_LEVEL_HIGH>;	/* ID 221 */
 			resets = <&reset 41>;
@@ -238,6 +246,7 @@
 		/* WLAN/BT combo chip. TODO: power sequencing and the SDIO function driver */
 		sdif2: mmc@e0c10000 {
 			compatible = "vita,sdhci";
+			clock-frequency = <102400000>;
 			reg = <0xe0c10000 0x100>;
 			interrupts = <GIC_SPI 190 IRQ_TYPE_LEVEL_HIGH>;	/* ID 222 */
 			resets = <&reset 42>;
@@ -248,6 +257,7 @@
 
 		sdif3: mmc@e0c20000 {
 			compatible = "vita,sdhci";
+			clock-frequency = <102400000>;
 			reg = <0xe0c20000 0x100>;
 			/* ID 223 (assumed): not in the wiki's interrupt table */
 			interrupts = <GIC_SPI 191 IRQ_TYPE_LEVEL_HIGH>;
@@ -374,7 +384,7 @@
 		led-gamecard {
 			label = "gpio-led-gamecard";
 			gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
-			linux,default-trigger = "disk-activity";
+			linux,default-trigger = "mmc1";	/* the game card slot */
 		};
 
 		led-ps-button-blue {

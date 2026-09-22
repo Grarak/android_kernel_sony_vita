@@ -174,6 +174,18 @@ config MMC_SDHCI_OF_ARASAN
 
 	  If unsure, say N.
 
+config MMC_SDHCI_VITA
+	tristate "SDHCI support for the PlayStation Vita SceSdif hosts"
+	depends on MMC_SDHCI_PLTFM
+	depends on ARCH_VITA || COMPILE_TEST
+	depends on OF
+	select RESET_CONTROLLER
+	help
+	  Glue for the four SD Host Controller 2.0 blocks of the Sony
+	  PlayStation Vita (eMMC, game card slot / SD2Vita, WLAN, spare).
+
+	  If unsure, say N.
+
 config MMC_SDHCI_OF_ASPEED
 	tristate "SDHCI OF support for the ASPEED SDHCI controller"
 	depends on ARCH_ASPEED || COMPILE_TEST
