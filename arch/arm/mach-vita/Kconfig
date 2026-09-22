@@ -1,20 +1,17 @@
 # SPDX-License-Identifier: GPL-2.0-only
 config ARCH_VITA
-	bool "PlayStation Vita"
-	depends on MMU
-	select CPU_V7
-	select HAVE_SMP
-	select HAVE_ARM_SCU
-	select CACHE_L2X0
-	select TIMER_OF
-	select HAVE_ARM_ARCH_TIMER
-	select HAVE_ARM_TWD
-	select ARM_GLOBAL_TIMER
-	select COMMON_CLK
-	select GENERIC_CLOCKEVENTS
-	select GENERIC_IRQ_MULTI_HANDLER
-	select SPARSE_IRQ
-	select USE_OF
+	bool "Sony PlayStation Vita (CXD5315GG)"
+	depends on ARCH_MULTI_V7
 	select ARM_GIC
+	select ARM_GLOBAL_TIMER
+	select CACHE_L2X0
+	select HAVE_ARM_SCU if SMP
+	select HAVE_ARM_TWD if SMP
+	select ARCH_HAS_RESET_CONTROLLER
+	select RESET_CONTROLLER
+	select PM_GENERIC_DOMAINS if PM
 	help
-	  Support for the Sony PlayStation Vita gaming console
+	  Support for the Sony PlayStation Vita family (PCH-1000, PCH-2000,
+	  VTE-1000 PlayStation TV and the DevKit/TestKit units), built around
+	  the CXD5315GG SoC: 4x Cortex-A9 MPCore r2p10, PL310 L2 cache r3p1,
+	  PowerVR SGX543MP4+.

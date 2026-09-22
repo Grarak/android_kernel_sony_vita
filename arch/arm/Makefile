@@ -108,6 +108,8 @@ tune-$(CONFIG_CPU_XSC3)		:=-mtune=xscale
 tune-$(CONFIG_CPU_FEROCEON)	:=-mtune=xscale
 tune-$(CONFIG_CPU_V6)		:=-mtune=arm1136j-s
 tune-$(CONFIG_CPU_V6K)		:=-mtune=arm1136j-s
+# The Vita's CXD5315GG is 4x Cortex-A9 r2p10: schedule for it.
+tune-$(CONFIG_ARCH_VITA)	:=-mtune=cortex-a9
 
 ifeq ($(CONFIG_AEABI),y)
 CFLAGS_ABI	:=-mabi=aapcs-linux -mfpu=vfp

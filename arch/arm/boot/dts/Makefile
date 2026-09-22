@@ -31,6 +31,7 @@ subdir-y += rockchip
 subdir-y += samsung
 subdir-y += sigmastar
 subdir-y += socionext
+subdir-y += sony
 subdir-y += st
 subdir-y += sunplus
 subdir-y += synaptics

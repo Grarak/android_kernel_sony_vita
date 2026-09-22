@@ -34,7 +34,11 @@ int vita_smp_boot_secondary(unsigned int cpu, struct task_struct *idle)
 		return -ENOMEM;
 	}
 
-	writel_relaxed(__pa_symbol(secondary_startup), boot_addr);
+	/*
+	 * secondary_startup_arm switches to Thumb-2 itself, so this also
+	 * works for a THUMB2_KERNEL whatever branch the parked core uses.
+	 */
+	writel_relaxed(__pa_symbol(secondary_startup_arm), boot_addr);
 
 	/* Ensure the write is visible to the secondary core */
 	smp_wmb();
