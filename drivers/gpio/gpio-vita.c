@@ -2,8 +2,10 @@
 // Copyright (C) 2021 Sergi Granell
 
 #include <linux/gpio/driver.h>
+#include <linux/gpio/generic.h>
 #include <linux/clk.h>
 #include <linux/interrupt.h>
+#include <linux/irqchip/chained_irq.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -12,8 +14,9 @@
 #include <linux/spinlock.h>
 
 #define VITA_GPIO_DIRECTION		0x00
-#define  VITA_GPIO_DIRECTION_OUT	0
-#define  VITA_GPIO_DIRECTION_IN		1
+/* Port mode: 1 = output, 0 = input (wiki GPIO_Registers, "Port mode") */
+#define  VITA_GPIO_DIRECTION_OUT	1
+#define  VITA_GPIO_DIRECTION_IN		0
 #define VITA_GPIO_READ			0x04
 #define VITA_GPIO_SET			0x08
 #define VITA_GPIO_CLEAR			0x0C
@@ -36,7 +39,7 @@
 #define VITA_GPIO_INT_STATUS_GATE4	0x48
 
 struct vita_gpio_chip {
-	struct gpio_chip	gc;
+	struct gpio_generic_chip	gen_gc;
 	void __iomem		*regs;
 	struct clk 		*clk;
 	struct reset_control    *rst;
@@ -49,15 +52,15 @@ static void vita_gpio_irq_mask(struct irq_data *d)
 	unsigned long flags;
 	u32 val;
 
-	//pr_info("vita_gpio_irq_mask: id: %d\n", d->hwirq);
-
-	raw_spin_lock_irqsave(&chip->bgpio_lock, flags);
+	gpio_generic_chip_lock_irqsave(&vgpio->gen_gc, flags);
 
 	val = ioread32(vgpio->regs + VITA_GPIO_INT_MASK_GATE0);
 	val |= BIT(d->hwirq);
 	iowrite32(val, vgpio->regs + VITA_GPIO_INT_MASK_GATE0);
 
-	raw_spin_unlock_irqrestore(&chip->bgpio_lock, flags);
+	gpio_generic_chip_unlock_irqrestore(&vgpio->gen_gc, flags);
+
+	gpiochip_disable_irq(chip, irqd_to_hwirq(d));
 }
 
 static void vita_gpio_irq_unmask(struct irq_data *d)
@@ -67,15 +70,15 @@ static void vita_gpio_irq_unmask(struct irq_data *d)
 	unsigned long flags;
 	u32 val;
 
-	//pr_info("vita_gpio_irq_unmask: id: %d\n", d->hwirq);
+	gpiochip_enable_irq(chip, irqd_to_hwirq(d));
 
-	raw_spin_lock_irqsave(&chip->bgpio_lock, flags);
+	gpio_generic_chip_lock_irqsave(&vgpio->gen_gc, flags);
 
 	val = ioread32(vgpio->regs + VITA_GPIO_INT_MASK_GATE0);
 	val &= ~BIT(d->hwirq);
 	iowrite32(val, vgpio->regs + VITA_GPIO_INT_MASK_GATE0);
 
-	raw_spin_unlock_irqrestore(&chip->bgpio_lock, flags);
+	gpio_generic_chip_unlock_irqrestore(&vgpio->gen_gc, flags);
 }
 
 static int vita_gpio_irq_set_type(struct irq_data *d, unsigned int type)
@@ -104,18 +107,24 @@ static int vita_gpio_irq_set_type(struct irq_data *d, unsigned int type)
 		mode = VITA_GPIO_INT_MODE_HLEVEL_SENS;
 	} else if (type == IRQ_TYPE_LEVEL_LOW) {
 		mode = VITA_GPIO_INT_MODE_LLEVEL_SENS;
+	} else {
+		/* No both-edges mode in the INT_MODE field */
+		return -EINVAL;
 	}
 
-	//pr_info("vita_gpio_irq_set_type: id: %d, type: %d (mode: %d)\n", d->hwirq, type, mode);
+	if (type & IRQ_TYPE_LEVEL_MASK)
+		irq_set_handler_locked(d, handle_level_irq);
+	else
+		irq_set_handler_locked(d, handle_edge_irq);
 
-	raw_spin_lock_irqsave(&chip->bgpio_lock, flags);
+	gpio_generic_chip_lock_irqsave(&vgpio->gen_gc, flags);
 
 	val = ioread32(vgpio->regs + reg);
 	val &= ~(3 << shift);
 	val |= mode << shift;
 	iowrite32(val, vgpio->regs + reg);
 
-	raw_spin_unlock_irqrestore(&chip->bgpio_lock, flags);
+	gpio_generic_chip_unlock_irqrestore(&vgpio->gen_gc, flags);
 
 	return 0;
 }
@@ -137,29 +146,30 @@ static void vita_gpio_irq_handler(struct irq_desc *desc)
 	chained_irq_enter(irqchip, desc);
 
 	for_each_set_bit(hwirq, &valid, chip->ngpio) {
-		generic_handle_irq(irq_find_mapping(chip->irq.domain, hwirq));
+		generic_handle_domain_irq(chip->irq.domain, hwirq);
 		iowrite32(BIT(hwirq), vgpio->regs + VITA_GPIO_INT_STATUS_GATE0);
 	}
 
 	chained_irq_exit(irqchip, desc);
 }
 
-static struct irq_chip vita_gpio_irqchip = {
+static const struct irq_chip vita_gpio_irqchip = {
 	.name		= "vita-gpio",
 	.irq_mask	= vita_gpio_irq_mask,
 	.irq_unmask	= vita_gpio_irq_unmask,
-	.irq_set_type	= vita_gpio_irq_set_type
+	.irq_set_type	= vita_gpio_irq_set_type,
+	.flags		= IRQCHIP_IMMUTABLE,
+	GPIOCHIP_IRQ_RESOURCE_HELPERS,
 };
 
 static int vita_gpio_probe(struct platform_device *pdev)
 {
 	struct vita_gpio_chip *vgpio;
 	struct gpio_irq_chip *girq;
+	struct gpio_generic_chip_config config;
 	struct device *dev = &pdev->dev;
 	int ret, irq;
 	u32 num_gpios = 32;
-
-	pr_info("vita_gpio_probe\n");
 
 	vgpio = devm_kzalloc(dev, sizeof(*vgpio), GFP_KERNEL);
 	if (!vgpio)
@@ -177,24 +187,28 @@ static int vita_gpio_probe(struct platform_device *pdev)
 
 	/* Reset GPIO status here? */
 
-	ret = bgpio_init(&vgpio->gc, dev, 4,
-			 vgpio->regs + VITA_GPIO_READ,
-			 vgpio->regs + VITA_GPIO_SET,
-			 vgpio->regs + VITA_GPIO_CLEAR,
-			 vgpio->regs + VITA_GPIO_DIRECTION,
-			 NULL,
-			 0 /* BGPIOF_READ_OUTPUT_REG_SET */);
+	/* DIRECTION: a set bit makes the port an output ("dirout") */
+	config = (struct gpio_generic_chip_config) {
+		.dev = dev,
+		.sz = 4,
+		.dat = vgpio->regs + VITA_GPIO_READ,
+		.set = vgpio->regs + VITA_GPIO_SET,
+		.clr = vgpio->regs + VITA_GPIO_CLEAR,
+		.dirout = vgpio->regs + VITA_GPIO_DIRECTION,
+	};
+
+	ret = gpio_generic_chip_init(&vgpio->gen_gc, &config);
 	if (ret) {
 		dev_err(dev, "Failed to register generic gpio, %d\n",
 			ret);
 		return ret;
 	}
 
-	vgpio->gc.label = dev_name(dev);
-	vgpio->gc.ngpio = num_gpios;
-	vgpio->gc.parent = dev;
-	vgpio->gc.base = -1;
-	vgpio->gc.owner = THIS_MODULE;
+	vgpio->gen_gc.gc.label = dev_name(dev);
+	vgpio->gen_gc.gc.ngpio = num_gpios;
+	vgpio->gen_gc.gc.parent = dev;
+	vgpio->gen_gc.gc.base = -1;
+	vgpio->gen_gc.gc.owner = THIS_MODULE;
 
 	vgpio->clk = devm_clk_get_optional(dev, NULL);
 	if (IS_ERR(vgpio->clk)) {
@@ -222,8 +236,8 @@ static int vita_gpio_probe(struct platform_device *pdev)
 	if (irq <= 0)
 		return irq ? irq : -ENODEV;
 
-	girq = &vgpio->gc.irq;
-	girq->chip = &vita_gpio_irqchip;
+	girq = &vgpio->gen_gc.gc.irq;
+	gpio_irq_chip_set_chip(girq, &vita_gpio_irqchip);
 	girq->parent_handler = vita_gpio_irq_handler;
 	girq->num_parents = 1;
 	girq->parents = devm_kcalloc(dev, 1,
@@ -237,7 +251,7 @@ static int vita_gpio_probe(struct platform_device *pdev)
 	girq->default_type = IRQ_TYPE_NONE;
 	girq->handler = handle_level_irq;
 
-	ret = devm_gpiochip_add_data(dev, &vgpio->gc, vgpio);
+	ret = devm_gpiochip_add_data(dev, &vgpio->gen_gc.gc, vgpio);
 	if (ret < 0) {
 		dev_err(dev, "Could not register gpiochip, %d\n", ret);
 		goto err_reset;
@@ -259,7 +273,7 @@ err_disable_clk:
 	return ret;
 }
 
-static int vita_gpio_remove(struct platform_device *pdev)
+static void vita_gpio_remove(struct platform_device *pdev)
 {
 	struct vita_gpio_chip *vgpio = platform_get_drvdata(pdev);
 	struct device *dev = &pdev->dev;
@@ -272,8 +286,6 @@ static int vita_gpio_remove(struct platform_device *pdev)
 
 	pm_runtime_disable(dev);
 	pm_runtime_put_noidle(dev);
-
-	return 0;
 }
 
 static const struct of_device_id vita_of_ids[] = {

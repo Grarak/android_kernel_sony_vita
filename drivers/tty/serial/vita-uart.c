@@ -99,29 +99,26 @@ static void vita_uart_stop_tx(struct uart_port *port)
 
 static void vita_uart_tx_chars(struct uart_port *port)
 {
-	struct circ_buf *xmit = &port->state->xmit;
+	struct tty_port *tport = &port->state->port;
+	unsigned char ch;
 
-	while (!uart_circ_empty(xmit)) {
+	if (port->x_char) {
 		while (!vita_uart_tx_ready(port))
 			cpu_relax();
-
-		if (port->x_char) {
-			vita_uart_write32(port, port->x_char, VITA_UART_WRITE_FIFO);
-			port->x_char = 0;
-			port->icount.tx++;
-			continue;
-		}
-
-		if (uart_tx_stopped(port))
-			break;
-
-		vita_uart_write32(port, xmit->buf[xmit->tail], VITA_UART_WRITE_FIFO);
-		xmit->tail = (xmit->tail + 1) % UART_XMIT_SIZE;
+		vita_uart_write32(port, port->x_char, VITA_UART_WRITE_FIFO);
+		port->x_char = 0;
 		port->icount.tx++;
-
-		if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
-			uart_write_wakeup(port);
 	}
+
+	/* No TX interrupt is wired up: drain the kfifo by polling TXREADY */
+	while (!uart_tx_stopped(port) && uart_fifo_get(port, &ch)) {
+		while (!vita_uart_tx_ready(port))
+			cpu_relax();
+		vita_uart_write32(port, ch, VITA_UART_WRITE_FIFO);
+	}
+
+	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
+		uart_write_wakeup(port);
 }
 
 static void vita_uart_start_tx(struct uart_port *port)

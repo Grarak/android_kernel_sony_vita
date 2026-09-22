@@ -131,7 +131,7 @@ static int vita_spi_probe(struct platform_device *pdev)
 
 	pr_info("vita_spi_probe\n");
 
-	ctlr = devm_spi_alloc_master(dev, sizeof(struct vita_spi));
+	ctlr = devm_spi_alloc_host(dev, sizeof(struct vita_spi));
 	if (!ctlr)
 		return -ENOMEM;
 
@@ -188,7 +188,7 @@ err_disable_clk:
 	return ret;
 }
 
-static int vita_spi_remove(struct platform_device *pdev)
+static void vita_spi_remove(struct platform_device *pdev)
 {
 	struct spi_controller *ctlr = platform_get_drvdata(pdev);
 	struct vita_spi *vspi = spi_controller_get_devdata(ctlr);
@@ -204,17 +204,11 @@ static int vita_spi_remove(struct platform_device *pdev)
 	pm_runtime_put_noidle(dev);
 
 	spi_unregister_controller(ctlr);
-
-	return 0;
 }
 
 static void vita_spi_shutdown(struct platform_device *pdev)
 {
-	int ret;
-
-	ret = vita_spi_remove(pdev);
-	if (ret)
-		dev_err(&pdev->dev, "failed to shutdown\n");
+	vita_spi_remove(pdev);
 }
 
 static const struct of_device_id vita_spi_match[] = {

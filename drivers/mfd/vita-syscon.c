@@ -61,7 +61,7 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 
 	syscon_calc_checksum(tx, tx_size - 1);
 
-	spi_bus_lock(spi->master);
+	spi_bus_lock(spi->controller);
 
 	do {
 		reinit_completion(&syscon->rx_irq);
@@ -98,7 +98,7 @@ static int vita_syscon_transfer(struct vita_syscon *syscon, u8 *tx, void *rx, in
 	} while (res == 0x80 || res == 0x81);
 
 out:
-	spi_bus_unlock(spi->master);
+	spi_bus_unlock(spi->controller);
 
 	return ret;
 }
