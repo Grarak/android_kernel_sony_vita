@@ -14,6 +14,7 @@
 #include <asm/mach/arch.h>
 
 static const char * const vita_dt_compat[] = {
+	"sony,vita",
 	"vita,vita",
 	NULL,
 };

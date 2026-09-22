@@ -1,13 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Base Device Tree Source for the PlayStation Vita
+ * Base Device Tree Source for the PlayStation Vita (CXD5315GG SoC)
+ *
+ * Sources of the hardware values:
+ *  [HW]   measured on a DevKit by a bare-metal test payload;
+ *  [WIKI] the wiki.henkaku.xyz pages;
+ *  [RE]   the Vita OS 3.65 modules, reverse engineered.
+ * Interrupt numbers in the wiki's SceKernelIntrMgr table are GIC interrupt
+ * IDs; GIC_SPI n below is ID - 32.
  */
 
-/dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 
 / {
-	model = "PlayStation Vita";
-	compatible = "vita,vita";
+	model = "Sony PlayStation Vita";
+	compatible = "sony,vita", "vita,vita";
 
 	#address-cells = <1>;
 	#size-cells = <1>;
@@ -20,64 +29,83 @@
 
 	aliases {
 		serial0 = &uart0;
+		/* Fixed MMC numbering: mmc0 is always the eMMC, mmc1 the game card slot */
+		mmc0 = &sdif0;
+		mmc1 = &sdif1;
+		mmc2 = &sdif2;
+		mmc3 = &sdif3;
 	};
 
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
+		/* Secondaries are parked by the loader at 0x1F007F00 + 4 * cpu */
 		enable-method = "vita,smp";
 
-		cpu@0 {
+		/* 4x Cortex-A9 r2p10 (MIDR 0x412FC09A) [WIKI CPU] */
+		cpu0: cpu@0 {
 			device_type = "cpu";
 			compatible = "arm,cortex-a9";
 			reg = <0>;
+			next-level-cache = <&l2>;
 		};
 
-		cpu@1 {
+		cpu1: cpu@1 {
 			device_type = "cpu";
 			compatible = "arm,cortex-a9";
 			reg = <1>;
+			next-level-cache = <&l2>;
 		};
 
-		cpu@2 {
+		cpu2: cpu@2 {
 			device_type = "cpu";
 			compatible = "arm,cortex-a9";
 			reg = <2>;
+			next-level-cache = <&l2>;
 		};
 
-		cpu@3 {
+		cpu3: cpu@3 {
 			device_type = "cpu";
 			compatible = "arm,cortex-a9";
 			reg = <3>;
+			next-level-cache = <&l2>;
 		};
 	};
 
-	memory {
-		device_type = "memory";
-		reg = <0x40200000 0x1FE00000>;
-	};
+	/* The memory node is per model: 512 MiB retail, 1 GiB DevKit */
 
-	l2: cache-controller@1A002000 {
-		compatible = "arm,pl310-cache";
-		reg = <0x1A002000 0x1000>;
-		cache-unified;
-		cache-level = <2>;
-	};
-
-	gic: interrupt-controller@1a001000 {
-		compatible = "arm,cortex-a9-gic";
-		#interrupt-cells = <3>;
-		#address-cells = <0>;
-		interrupt-controller;
-		reg = <0x1a001000 0x1000>,
-		      <0x1a000100 0x1000>;
-	};
-
-	refclk144mhz: refclk144mkhz {
+	/*
+	 * PERIPHCLK of the MPCore private block, which clocks the global timer
+	 * and the private (TWD) timers: ~165.7 MHz measured [HW, gic.c GT/PT].
+	 * (That is CPUCLK/2 for the 333 MHz ARM clock; the ARM clock is
+	 * 27.777 MHz * mult * (1 - div/16) from ScePervasiveBaseClk [WIKI].)
+	 * xerpi's tree assumed 144 MHz.
+	 */
+	periphclk: periphclk {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
-		clock-frequency = <144000000>;
-		clock-output-names = "refclk144khz";
+		clock-frequency = <165700000>;
+		clock-output-names = "periphclk";
+	};
+
+	/*
+	 * System timer (SceSystimer, 0xE20B0000) source clocks [HW, timers.c]:
+	 * source 0 ~220.9 MHz, source 16 = 27 MHz (the display driver's
+	 * clock). No Linux driver uses them yet; the MPCore timers are enough.
+	 * TODO: a clocksource for the 1 MHz word/long-range timers.
+	 */
+	systimer_src0: systimer-src0 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <220900000>;
+		clock-output-names = "systimer-src0";
+	};
+
+	systimer_src16: systimer-src16 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <27000000>;
+		clock-output-names = "systimer-src16";
 	};
 
 	soc {
@@ -87,25 +115,157 @@
 		interrupt-parent = <&gic>;
 		ranges;
 
+		/*
+		 * Cortex-A9 MPCore private region at 0x1A000000 [WIKI].
+		 * SCU CTRL reads 0x61 (enabled, SCU + IC standby) and CONFIG
+		 * 0x55F3 (4 CPUs, all in SMP mode, 32 KiB L1 tag RAMs) [HW].
+		 */
+		scu: scu@1a000000 {
+			compatible = "arm,cortex-a9-scu";
+			reg = <0x1a000000 0x58>;
+		};
+
+		/*
+		 * GIC: GICD_TYPER 0xFC67 (256 interrupt IDs, 4 CPUs, security
+		 * extensions, 31 lockable SPIs), GICD_IIDR 0x0102043B,
+		 * GICC_IIDR 0x3901243B [HW].
+		 * The CPU interface is 0x100 bytes at +0x100 (xerpi's 0x1000
+		 * covered the global and private timers too).
+		 */
+		gic: interrupt-controller@1a001000 {
+			compatible = "arm,cortex-a9-gic";
+			#interrupt-cells = <3>;
+			#address-cells = <0>;
+			interrupt-controller;
+			reg = <0x1a001000 0x1000>,
+			      <0x1a000100 0x100>;
+		};
+
+		/*
+		 * The global timer counts on the DevKit from the non-secure side
+		 * (the probe measured its rate) [HW]. xerpi had it disabled and
+		 * ran without a clocksource.
+		 * TODO: confirm SCU SNSAC lets the non-secure side write its
+		 * control register on retail units too.
+		 */
+		global_timer: timer@1a000200 {
+			compatible = "arm,cortex-a9-global-timer";
+			reg = <0x1a000200 0x20>;
+			interrupts = <GIC_PPI 11 (GIC_CPU_MASK_SIMPLE(4) | IRQ_TYPE_EDGE_RISING)>;
+			clocks = <&periphclk>;
+		};
+
+		local_timer: timer@1a000600 {
+			compatible = "arm,cortex-a9-twd-timer";
+			reg = <0x1a000600 0x20>;
+			interrupts = <GIC_PPI 13 (GIC_CPU_MASK_SIMPLE(4) | IRQ_TYPE_EDGE_RISING)>;
+			clocks = <&periphclk>;
+		};
+
+		/*
+		 * PL310 r3p1: Cache ID 0x410000C7, Cache Type 0x1E440440
+		 * (16 ways of 128 KiB, 32-byte lines: 2 MiB) [WIKI Caches, HW].
+		 * NSKBL programs AUX 0x60090001, tag latency 0 (1 cycle),
+		 * data latency 0x131 (read 4, write 2, setup 2 cycles) and
+		 * prefetch 0x20000000 (instruction prefetch) [WIKI Caches].
+		 * The L2 is already enabled when Linux starts, so these are
+		 * only used if a loader ever hands over with it disabled.
+		 */
+		l2: cache-controller@1a002000 {
+			compatible = "arm,pl310-cache";
+			reg = <0x1a002000 0x1000>;
+			cache-unified;
+			cache-level = <2>;
+			cache-size = <0x200000>;
+			cache-sets = <4096>;
+			cache-line-size = <32>;
+			arm,tag-latency = <1 1 1>;
+			arm,data-latency = <4 2 2>;
+			prefetch-instr = <1>;
+			prefetch-data = <0>;
+		};
+
+		/* SceMsif: Memory Card (ux0) [WIKI Memory_Mapping] */
+		msif: memory-card@e0900000 {
+			compatible = "vita,msif";
+			reg = <0xe0900000 0x10000>;
+			/* SceMsifIns (ID 60), SceMsifSmshc (ID 61) [WIKI SceKernelIntrMgr] */
+			interrupts = <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 29 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "insert", "smshc";
+			/*
+			 * Deliberately no "resets": the card must stay powered and
+			 * authenticated by the boot loader (commands 0x48-0x4B), and a
+			 * reset of the controller or the card would undo that.
+			 */
+			status = "okay";
+		};
+
+		/*
+		 * SceSdif0-3: SDHCI 2.0 hosts (Host Controller Version 0x8901,
+		 * vendor 0x89) with the register block mirrored every 0x100
+		 * [WIKI SDIF_Registers]. Pervasive reset bits at
+		 * +0xA0..+0xAC [WIKI Pervasive]: indices 40..43.
+		 */
+		sdif0: mmc@e0b00000 {
+			compatible = "vita,sdhci";
+			reg = <0xe0b00000 0x100>;
+			interrupts = <GIC_SPI 188 IRQ_TYPE_LEVEL_HIGH>;	/* ID 220 */
+			resets = <&reset 40>;
+			bus-width = <8>;
+			non-removable;
+			/*
+			 * The eMMC holds the Vita OS and is block-encrypted by the
+			 * SoC; leave it alone.
+			 */
+			status = "disabled";
+		};
+
+		/* Game card slot: an SD2Vita adapter makes it a microSD slot */
+		sdif1: mmc@e0c00000 {
+			compatible = "vita,sdhci";
+			reg = <0xe0c00000 0x100>;
+			interrupts = <GIC_SPI 189 IRQ_TYPE_LEVEL_HIGH>;	/* ID 221 */
+			resets = <&reset 41>;
+			bus-width = <4>;
+			cap-sd-highspeed;
+			/* TODO: 1.8 V signalling goes through ScePervasiveMisc +0x124 */
+			no-1-8-v;
+			/* TODO: slot power is a Syscon command; the loader leaves it on */
+			status = "okay";
+		};
+
+		/* WLAN/BT combo chip. TODO: power sequencing and the SDIO function driver */
+		sdif2: mmc@e0c10000 {
+			compatible = "vita,sdhci";
+			reg = <0xe0c10000 0x100>;
+			interrupts = <GIC_SPI 190 IRQ_TYPE_LEVEL_HIGH>;	/* ID 222 */
+			resets = <&reset 42>;
+			bus-width = <4>;
+			non-removable;
+			status = "disabled";
+		};
+
+		sdif3: mmc@e0c20000 {
+			compatible = "vita,sdhci";
+			reg = <0xe0c20000 0x100>;
+			/* ID 223 (assumed): not in the wiki's interrupt table */
+			interrupts = <GIC_SPI 191 IRQ_TYPE_LEVEL_HIGH>;
+			resets = <&reset 43>;
+			status = "disabled";
+		};
+
+		/*
+		 * UART0: debug console. It has no registered interrupt in the OS
+		 * (only UART1 ID 225 and UART6 ID 230 do [WIKI SceKernelIntrMgr]),
+		 * so the driver polls.
+		 */
 		uart0: serial@e2030000 {
 			compatible = "vita,vita-uart";
 			reg = <0xe2030000 0x10000>;
 		};
 
-		/*global_timer@1a000200 {
-			compatible = "arm,cortex-a9-global-timer";
-			reg = <0x1a000200 0x100>;
-			interrupts = <GIC_PPI 11 (GIC_CPU_MASK_RAW(0xF) | IRQ_TYPE_EDGE_RISING)>;
-			clocks = <&refclk144mhz>;
-		};*/
-
-		local_timer@1a000600 {
-			compatible = "arm,cortex-a9-twd-timer";
-			reg = <0x1a000600 0x100>;
-			interrupts = <GIC_PPI 13 (GIC_CPU_MASK_RAW(0xF) | IRQ_TYPE_EDGE_RISING)>;
-			clocks = <&refclk144mhz>;
-		};
-
+		/* GPIO0: port mode register 1 = output [WIKI GPIO_Registers] */
 		gpio0: gpio@e20a0000 {
 			compatible = "vita,gpio";
 			#address-cells = <1>;
@@ -113,11 +273,12 @@
 			reg = <0xe20a0000 0x1000>;
 
 			interrupt-parent = <&gic>;
-			interrupts = <GIC_SPI 216 IRQ_TYPE_LEVEL_HIGH
-				      GIC_SPI 217 IRQ_TYPE_LEVEL_HIGH
-				      GIC_SPI 218 IRQ_TYPE_LEVEL_HIGH
-				      GIC_SPI 219 IRQ_TYPE_LEVEL_HIGH
-				      GIC_SPI 220 IRQ_TYPE_LEVEL_HIGH>;
+			/* SceGpio0Gate0-4, IDs 248-252 [WIKI SceKernelIntrMgr] */
+			interrupts = <GIC_SPI 216 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 217 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 218 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 219 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 220 IRQ_TYPE_LEVEL_HIGH>;
 
 			gpio-controller;
 			#gpio-cells = <2>;
@@ -126,11 +287,32 @@
 			interrupt-controller;
 			#interrupt-cells = <2>;
 
+			/* ScePervasiveReset +0x100 */
 			resets = <&reset 64>;
 			reset-names = "gpio0_reset";
 		};
 
-		spi0: spi@1c05000 {
+		/*
+		 * GPIO1 (0xE0100000): gate 0/1 interrupts are IDs 253/254, gates
+		 * 2-4 are listed as IDs 49-51 [WIKI SceKernelIntrMgr]. Its
+		 * Pervasive reset/gate bit is not documented.
+		 * TODO: find the reset bit before enabling.
+		 */
+		gpio1: gpio@e0100000 {
+			compatible = "vita,gpio";
+			reg = <0xe0100000 0x1000>;
+			interrupt-parent = <&gic>;
+			interrupts = <GIC_SPI 221 IRQ_TYPE_LEVEL_HIGH>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			ngpios = <32>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			status = "disabled";
+		};
+
+		/* SceSpi0 (Syscon) [WIKI SPI_Registers]; ScePervasiveReset +0x104 */
+		spi0: spi@e0a00000 {
 			compatible = "vita,spi";
 			reg = <0xe0a00000 0x1000>;
 			#address-cells = <1>;
@@ -142,9 +324,8 @@
 			syscon: syscon@0 {
 				compatible = "vita,syscon";
 				reg = <0>;
-				#address-cells = <0>;
-				#size-cells = <0>;
 
+				/* GPIO0 port 4: Syscon (input); port 3: Syscon (output) [WIKI GPIO_Registers] */
 				interrupt-parent = <&gpio0>;
 				interrupts = <4 IRQ_TYPE_EDGE_FALLING>;
 
@@ -162,19 +343,34 @@
 					compatible = "vita,syscon-rtc";
 				};
 			};
-
 		};
 
+		/* ScePervasiveReset: one bit per device, set = held in reset [WIKI Pervasive] */
 		reset: reset@e3101000 {
 			compatible = "vita,reset";
 			#reset-cells = <1>;
 			reg = <0xe3101000 0x1000>;
+		};
+
+		/*
+		 * PowerVR SGX543MP4+: CORE_ID 0x01174403, CORE_REVISION 0x00020106
+		 * [HW]. Power-up needs SMC 0x110 and the
+		 * SGXStart sequence before any register access; SceGpuLisr is ID 52
+		 * [WIKI SceKernelIntrMgr]. There is no open SGX543 driver, so Android
+		 * renders in software.
+		 */
+		gpu: gpu@e8400000 {
+			compatible = "sony,vita-gpu", "img,powervr-sgx543";
+			reg = <0xe8400000 0x10000>;
+			interrupts = <GIC_SPI 20 IRQ_TYPE_LEVEL_HIGH>;
+			status = "disabled";
 		};
 	};
 
 	leds {
 		compatible = "gpio-leds";
 
+		/* GPIO0 ports 6/7 [WIKI GPIO_Registers] */
 		led-gamecard {
 			label = "gpio-led-gamecard";
 			gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
