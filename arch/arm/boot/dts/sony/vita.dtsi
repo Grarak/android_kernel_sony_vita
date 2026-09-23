@@ -272,7 +272,14 @@
 			status = "okay";
 		};
 
-		/* WLAN/BT combo chip. TODO: power sequencing and the SDIO function driver */
+		/*
+		 * WLAN/BT: "Robin", a Marvell 88W8787 SDIO card with WLAN
+		 * function 1 (02df:9119, mwifiex_sdio) and Bluetooth function 2
+		 * (02df:911a, btmrvl_sdio) [WIKI Robin, Components].
+		 * Its I/O runs at 1.8 V (SceSdif selects it in ScePervasiveMisc
+		 * +0x124 bit 2; the boot loader does the same), and the Syscon
+		 * powers and resets it (wlanbt_pwrseq).
+		 */
 		sdif2: mmc@e0c10000 {
 			compatible = "vita,sdhci";
 			clock-frequency = <102400000>;
@@ -281,7 +288,10 @@
 			resets = <&reset 42>;
 			bus-width = <4>;
 			non-removable;
-			status = "disabled";
+			no-sd;
+			no-mmc;
+			mmc-pwrseq = <&wlanbt_pwrseq>;
+			status = "okay";
 		};
 
 		sdif3: mmc@e0c20000 {
@@ -380,6 +390,17 @@
 
 				syscon-rtc {
 					compatible = "vita,syscon-rtc";
+				};
+
+				/*
+				 * WLAN/BT module supply (Syscon command 0x88A) and
+				 * reset (command 0x88F, device 0x10), as SceWlanBt
+				 * drives them [WIKI SceSyscon, wlanbt.skprx
+				 * 0x81000168]. The boot loader enables the module's
+				 * 27 MHz clock (SceClockgen register 1 bit 7).
+				 */
+				wlanbt_pwrseq: syscon-wlanbt-pwrseq {
+					compatible = "vita,syscon-wlanbt-pwrseq";
 				};
 			};
 		};
