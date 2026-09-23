@@ -36,6 +36,30 @@
 		mmc3 = &sdif3;
 	};
 
+	/*
+	 * Android's first-stage mount. The boot loader maps ux0:data/android/emmc.img
+	 * to the GPT disk vitaemmc (see msif below); system is the root file
+	 * system (root=PARTLABEL=system), vendor is mounted from here before
+	 * SELinux loads its policy.
+	 */
+	firmware {
+		android {
+			compatible = "android,firmware";
+
+			fstab {
+				compatible = "android,fstab";
+
+				vendor {
+					compatible = "android,vendor";
+					dev = "/dev/block/platform/soc/e0900000.memory-card/by-name/vendor";
+					type = "ext4";
+					mnt_flags = "ro,barrier=1";
+					fsmgr_flags = "wait";
+				};
+			};
+		};
+	};
+
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -197,6 +221,11 @@
 			 * Deliberately no "resets": the card must stay powered and
 			 * authenticated by the boot loader (commands 0x48-0x4B), and a
 			 * reset of the controller or the card would undo that.
+			 *
+			 * The boot loader adds one child per ux0 file it maps, so
+			 * Linux reaches nothing else on the card:
+			 *	emmc { label = "emmc"; vita,extents = <...>; };
+			 *	sdcard { label = "sdcard"; vita,extents = <...>; };
 			 */
 			status = "okay";
 		};

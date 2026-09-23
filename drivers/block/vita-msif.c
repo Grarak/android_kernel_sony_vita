@@ -23,7 +23,7 @@
  * block the "sce" partition parser reads. With child nodes, which the
  * Android boot chain adds, Linux sees only the files they describe:
  *
- *	disk@0 {
+ *	emmc {
  *		label = "emmc";
  *		vita,extents = <start count>, ...;
  *	};
