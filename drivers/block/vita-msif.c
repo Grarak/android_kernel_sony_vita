@@ -18,6 +18,20 @@
  * unless vita_msif.writable=1.
  *
  * Register offsets: libbaremetal src/msif.c.
+ *
+ * Without child nodes the whole card is one disk, msblk0, whose SCE master
+ * block the "sce" partition parser reads. With child nodes, which the
+ * Android boot chain adds, Linux sees only the files they describe:
+ *
+ *	disk@0 {
+ *		label = "emmc";
+ *		vita,extents = <start count>, ...;
+ *	};
+ *
+ * Each child becomes the disk vita<label>, the concatenation of its
+ * extents (card sectors: first sector and sector count). The loader
+ * resolved them from the files' exFAT allocation while the Vita OS still
+ * ran, and no sector outside them is ever addressed.
  */
 
 #include <linux/blk-mq.h>
@@ -75,12 +89,26 @@ static bool writable;
 module_param(writable, bool, 0444);
 MODULE_PARM_DESC(writable, "Allow writes to the memory card (untested on hardware)");
 
+struct vita_msif_extent {
+	u32 start;
+	u32 count;
+};
+
+struct vita_msif_disk {
+	struct vita_msif *ms;
+	struct blk_mq_tag_set tag_set;
+	struct gendisk *disk;
+	/* NULL for the whole card */
+	struct vita_msif_extent *extents;
+	unsigned int nr_extents;
+};
+
 struct vita_msif {
 	struct device *dev;
 	void __iomem *regs;
 	struct mutex lock;	/* serialises card commands */
-	struct blk_mq_tag_set tag_set;
-	struct gendisk *disk;
+	struct vita_msif_disk *disks;
+	unsigned int nr_disks;
 	bool wp;
 };
 
@@ -263,10 +291,26 @@ err:
 	return ret;
 }
 
+/* The card sector behind @sector of @md, or U32_MAX past its end. */
+static u32 vita_msif_map(struct vita_msif_disk *md, sector_t sector)
+{
+	unsigned int i;
+
+	if (!md->extents)
+		return sector < U32_MAX ? sector : U32_MAX;
+	for (i = 0; i < md->nr_extents; i++) {
+		if (sector < md->extents[i].count)
+			return md->extents[i].start + sector;
+		sector -= md->extents[i].count;
+	}
+	return U32_MAX;
+}
+
 static blk_status_t vita_msif_queue_rq(struct blk_mq_hw_ctx *hctx,
 				       const struct blk_mq_queue_data *bd)
 {
-	struct vita_msif *ms = hctx->queue->queuedata;
+	struct vita_msif_disk *md = hctx->queue->queuedata;
+	struct vita_msif *ms = md->ms;
 	struct request *rq = bd->rq;
 	bool write = rq_data_dir(rq) == WRITE;
 	sector_t sector = blk_rq_pos(rq);
@@ -299,9 +343,12 @@ static blk_status_t vita_msif_queue_rq(struct blk_mq_hw_ctx *hctx,
 		unsigned int off;
 
 		for (off = 0; off < bvec.bv_len; off += MS_SECTOR_SIZE) {
-			if (ms_xfer_sector(ms, write ? MSPRO_CMD_WRITE_DATA :
+			u32 card_sector = vita_msif_map(md, sector++);
+
+			if (card_sector == U32_MAX ||
+			    ms_xfer_sector(ms, write ? MSPRO_CMD_WRITE_DATA :
 					   MSPRO_CMD_READ_DATA,
-					   sector++, buf + off, write)) {
+					   card_sector, buf + off, write)) {
 				status = BLK_STS_IOERR;
 				break;
 			}
@@ -384,12 +431,147 @@ static sector_t vita_msif_capacity(struct vita_msif *ms, u8 *buf)
 	return 0;
 }
 
-static int vita_msif_probe(struct platform_device *pdev)
+static void vita_msif_del_disk(struct vita_msif_disk *md)
+{
+	del_gendisk(md->disk);
+	put_disk(md->disk);
+	blk_mq_free_tag_set(&md->tag_set);
+}
+
+/*
+ * A registered major with contiguous minors: a disk without one gets its
+ * dev_t from the extended range, where the kernel refuses minors, and
+ * Android's vold numbers partitions from the disk's own minor.
+ */
+#define VITA_MSIF_MINORS	16
+static int vita_msif_major;
+
+static int vita_msif_add_disk(struct vita_msif *ms, struct vita_msif_disk *md,
+			      const char *name, sector_t capacity)
 {
 	struct queue_limits lim = {
 		.logical_block_size	= MS_SECTOR_SIZE,
 		.max_hw_sectors		= 128,
 	};
+	int ret;
+
+	md->ms = ms;
+	md->tag_set.ops = &vita_msif_mq_ops;
+	md->tag_set.nr_hw_queues = 1;
+	md->tag_set.queue_depth = 16;
+	md->tag_set.numa_node = NUMA_NO_NODE;
+	md->tag_set.flags = BLK_MQ_F_BLOCKING;
+	ret = blk_mq_alloc_tag_set(&md->tag_set);
+	if (ret)
+		return ret;
+
+	md->disk = blk_mq_alloc_disk(&md->tag_set, &lim, md);
+	if (IS_ERR(md->disk)) {
+		ret = PTR_ERR(md->disk);
+		goto err_tag_set;
+	}
+
+	md->disk->fops = &vita_msif_fops;
+	md->disk->private_data = md;
+	md->disk->major = vita_msif_major;
+	md->disk->first_minor = (md - ms->disks) * VITA_MSIF_MINORS;
+	md->disk->minors = VITA_MSIF_MINORS;
+	strscpy(md->disk->disk_name, name, sizeof(md->disk->disk_name));
+	set_capacity(md->disk, capacity);
+	if (ms->wp || !writable)
+		set_disk_ro(md->disk, true);
+
+	/*
+	 * Under the platform device, so Android's init makes
+	 * /dev/block/platform/<msif>/by-name/ links for the first-stage mount.
+	 */
+	ret = device_add_disk(ms->dev, md->disk, NULL);
+	if (ret)
+		goto err_disk;
+
+	dev_info(ms->dev, "%s: %llu sectors (%llu MiB) in %u extent(s)%s\n",
+		 name, (unsigned long long)capacity,
+		 (unsigned long long)capacity >> 11, md->nr_extents ?: 1,
+		 ms->wp ? ", write-protected" : (writable ? "" : ", read-only"));
+	return 0;
+
+err_disk:
+	put_disk(md->disk);
+err_tag_set:
+	blk_mq_free_tag_set(&md->tag_set);
+	return ret;
+}
+
+/* One disk per child node with vita,extents; msblk0 for the card without any. */
+static int vita_msif_add_disks(struct vita_msif *ms, sector_t card_sectors)
+{
+	struct device_node *child;
+	unsigned int n = 0, i;
+	int ret;
+
+	ms->nr_disks = of_get_available_child_count(ms->dev->of_node);
+	ms->disks = devm_kcalloc(ms->dev, max(ms->nr_disks, 1u),
+				 sizeof(*ms->disks), GFP_KERNEL);
+	if (!ms->disks)
+		return -ENOMEM;
+	if (!ms->nr_disks) {
+		ms->nr_disks = 1;
+		return vita_msif_add_disk(ms, &ms->disks[0], "msblk0", card_sectors);
+	}
+
+	for_each_available_child_of_node(ms->dev->of_node, child) {
+		struct vita_msif_disk *md = &ms->disks[n];
+		char name[DISK_NAME_LEN];
+		const char *label;
+		sector_t capacity = 0;
+		int count;
+
+		count = of_property_count_u32_elems(child, "vita,extents");
+		if (of_property_read_string(child, "label", &label) || count <= 0 ||
+		    count % 2) {
+			ret = dev_err_probe(ms->dev, -EINVAL, "%pOF: needs label and vita,extents\n",
+					    child);
+			goto err;
+		}
+		md->nr_extents = count / 2;
+		md->extents = devm_kcalloc(ms->dev, md->nr_extents,
+					   sizeof(*md->extents), GFP_KERNEL);
+		if (!md->extents) {
+			ret = -ENOMEM;
+			goto err;
+		}
+		of_property_read_u32_array(child, "vita,extents", (u32 *)md->extents,
+					   count);
+		for (i = 0; i < md->nr_extents; i++) {
+			const struct vita_msif_extent *e = &md->extents[i];
+
+			if (!e->count || e->start >= card_sectors ||
+			    e->count > card_sectors - e->start) {
+				ret = dev_err_probe(ms->dev, -EINVAL,
+						    "%s: extent %u+%u is off the card\n",
+						    label, e->start, e->count);
+				goto err;
+			}
+			capacity += e->count;
+		}
+
+		snprintf(name, sizeof(name), "vita%s", label);
+		ret = vita_msif_add_disk(ms, md, name, capacity);
+		if (ret)
+			goto err;
+		n++;
+	}
+	return 0;
+
+err:
+	of_node_put(child);
+	while (n--)
+		vita_msif_del_disk(&ms->disks[n]);
+	return ret;
+}
+
+static int vita_msif_probe(struct platform_device *pdev)
+{
 	struct device *dev = &pdev->dev;
 	struct vita_msif *ms;
 	sector_t capacity;
@@ -423,55 +605,21 @@ static int vita_msif_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -ENODEV,
 				     "no authenticated memory card (did the loader run msif_setup?)\n");
 
-	ms->tag_set.ops = &vita_msif_mq_ops;
-	ms->tag_set.nr_hw_queues = 1;
-	ms->tag_set.queue_depth = 16;
-	ms->tag_set.numa_node = NUMA_NO_NODE;
-	ms->tag_set.flags = BLK_MQ_F_BLOCKING;
-	ret = blk_mq_alloc_tag_set(&ms->tag_set);
+	ret = vita_msif_add_disks(ms, capacity);
 	if (ret)
 		return ret;
 
-	ms->disk = blk_mq_alloc_disk(&ms->tag_set, &lim, ms);
-	if (IS_ERR(ms->disk)) {
-		ret = PTR_ERR(ms->disk);
-		goto err_tag_set;
-	}
-
-	ms->disk->fops = &vita_msif_fops;
-	ms->disk->private_data = ms;
-	ms->disk->minors = 16;
-	ms->disk->major = 0;
-	strscpy(ms->disk->disk_name, "msblk0", sizeof(ms->disk->disk_name));
-	set_capacity(ms->disk, capacity);
-	if (ms->wp || !writable)
-		set_disk_ro(ms->disk, true);
-
-	ret = add_disk(ms->disk);
-	if (ret)
-		goto err_disk;
-
 	platform_set_drvdata(pdev, ms);
-	dev_info(dev, "memory card: %llu sectors (%llu MiB)%s\n",
-		 (unsigned long long)capacity,
-		 (unsigned long long)capacity >> 11,
-		 ms->wp ? ", write-protected" : (writable ? "" : ", read-only"));
 	return 0;
-
-err_disk:
-	put_disk(ms->disk);
-err_tag_set:
-	blk_mq_free_tag_set(&ms->tag_set);
-	return ret;
 }
 
 static void vita_msif_remove(struct platform_device *pdev)
 {
 	struct vita_msif *ms = platform_get_drvdata(pdev);
+	unsigned int i;
 
-	del_gendisk(ms->disk);
-	put_disk(ms->disk);
-	blk_mq_free_tag_set(&ms->tag_set);
+	for (i = 0; i < ms->nr_disks; i++)
+		vita_msif_del_disk(&ms->disks[i]);
 }
 
 static const struct of_device_id vita_msif_of_match[] = {
@@ -488,7 +636,27 @@ static struct platform_driver vita_msif_driver = {
 	.probe = vita_msif_probe,
 	.remove = vita_msif_remove,
 };
-module_platform_driver(vita_msif_driver);
+
+static int __init vita_msif_init(void)
+{
+	int ret;
+
+	vita_msif_major = register_blkdev(0, "vitamsif");
+	if (vita_msif_major < 0)
+		return vita_msif_major;
+	ret = platform_driver_register(&vita_msif_driver);
+	if (ret)
+		unregister_blkdev(vita_msif_major, "vitamsif");
+	return ret;
+}
+module_init(vita_msif_init);
+
+static void __exit vita_msif_exit(void)
+{
+	platform_driver_unregister(&vita_msif_driver);
+	unregister_blkdev(vita_msif_major, "vitamsif");
+}
+module_exit(vita_msif_exit);
 
 MODULE_DESCRIPTION("PlayStation Vita Memory Card (SceMsif) block driver");
 MODULE_LICENSE("GPL");
