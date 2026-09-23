@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config DRM_PSP2SGX
+	tristate "PlayStation Vita SGX543MP4+ GPU"
+	depends on DRM
+	depends on ARM || COMPILE_TEST
+	depends on MMU
+	depends on OF
+	select DRM_SCHED
+	select DRM_GEM_SHMEM_HELPER
+	select DRM_EXEC
+	select SYNC_FILE
+	help
+	  DRM render driver for the PowerVR SGX543MP4+ of the Sony
+	  PlayStation Vita. The driver assembles and runs its own GPU
+	  microkernel; Mesa's psp2sgx gallium driver is its userspace.
