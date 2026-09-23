@@ -23,6 +23,17 @@ config PWRSEQ_SD8787
 	  This driver can also be built as a module. If so, the module
 	  will be called pwrseq_sd8787.
 
+config PWRSEQ_VITA_WLANBT
+	tristate "PlayStation Vita WLAN/BT module power sequence"
+	depends on OF && MFD_VITA_SYSCON
+	help
+	  Power and reset control of the PlayStation Vita's Marvell 88W8787
+	  WLAN/BT module on SceSdif2. Its supply and reset line are Syscon
+	  commands, not GPIOs.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called pwrseq_vita_wlanbt.
+
 config PWRSEQ_SIMPLE
 	tristate "Simple HW reset support for MMC"
 	default y

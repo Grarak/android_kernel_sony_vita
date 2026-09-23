@@ -23,6 +23,10 @@ static const struct mfd_cell vita_syscon_devs[] = {
 		.name = "vita-syscon-rtc",
 		.of_compatible = "vita,syscon-rtc"
 	},
+	{
+		.name = "vita-syscon-wlanbt-pwrseq",
+		.of_compatible = "vita,syscon-wlanbt-pwrseq"
+	},
 };
 
 static inline void syscon_set_tx_gpio(struct vita_syscon *syscon, int is_on)
