@@ -35,10 +35,13 @@ static int vita_smp_boot_secondary(unsigned int cpu, struct task_struct *idle)
 	}
 
 	/*
-	 * secondary_startup_arm switches to Thumb-2 itself, so this also
-	 * works for a THUMB2_KERNEL whatever branch the parked core uses.
+	 * secondary_startup_arm is ARM code that switches to Thumb-2 itself,
+	 * so this works for a THUMB2_KERNEL whatever branch the parked core
+	 * uses, as long as bit 0 is clear: LLVM's assembler marks the symbol
+	 * as Thumb because its ENDPROC follows the switch to .thumb, and the
+	 * loader's blx would then enter ARM code in Thumb state.
 	 */
-	writel_relaxed(__pa_symbol(secondary_startup_arm), boot_addr);
+	writel_relaxed(__pa_symbol(secondary_startup_arm) & ~1UL, boot_addr);
 
 	/* Ensure the write is visible to the secondary core */
 	smp_wmb();
