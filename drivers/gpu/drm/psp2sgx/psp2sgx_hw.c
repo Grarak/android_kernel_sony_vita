@@ -41,8 +41,8 @@ static u32 psp2sgx_smc_bus(u32 service, u32 bus, u32 command)
 static void psp2sgx_start(struct psp2sgx_device *sgx)
 {
 	sgx_write(sgx, SGX_MASTER_CORE, 3);
-	sgx_write(sgx, SGX_MASTER_CLKGATECTL, 0x2a9);
-	sgx_write(sgx, SGX_MASTER_SLC_CTRL, 0xaa);
+	sgx_write(sgx, SGX_MASTER_CLKGATECTL2, 0x2a9);
+	sgx_write(sgx, SGX_MASTER_CLKGATECTL, 0xaa);
 	sgx_write(sgx, SGX_MASTER_SOFT_RESET, 0x7ff);
 	wmb();
 	udelay(10);

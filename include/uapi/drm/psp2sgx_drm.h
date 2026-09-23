@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define PSP2SGX_UAPI_VERSION	1
+#define PSP2SGX_UAPI_VERSION	2
 
 enum drm_psp2sgx_param {
 	DRM_PSP2SGX_PARAM_UAPI_VERSION,

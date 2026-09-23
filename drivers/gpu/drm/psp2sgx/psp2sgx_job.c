@@ -67,25 +67,48 @@ struct reg_range {
 
 /*
  * What a render may write: the vertex data master, tiling engine, MTE, ISP,
- * DPM, TSP and pixel event registers the DDK's microkernel programs for a
+ * DPM, TPU and pixel event registers the DDK's microkernel programs for a
  * TA/3D kick, the BIF requestor bases (addresses the MMU still translates),
  * and the event clears for what a render waits on.  Not the BIF, code bases,
- * event enables or kicks: those belong to the kernel.
+ * event enables or kicks: those belong to the kernel.  Addresses are in the
+ * broadcast bank unless noted; per-core copies are in core_write_ok.
  */
 static const struct reg_range write_ok[] = {
 	{ 0x0114, 0x0114 },	/* EVENT_HOST_CLEAR2, bits checked below */
 	{ 0x0134, 0x0134 },	/* EVENT_HOST_CLEAR, bits checked below */
 	{ 0x0140, 0x0140 },	/* PDS_CACHE_HOST_CLEAR */
+	{ 0x0148, 0x0148 },	/* DOUBLE_PIXEL_PARTITIONS */
 	{ 0x0200, 0x025c },	/* VDM, TE, MTE */
 	{ 0x0380, 0x038c },	/* TE_RGNHDR_INIT */
 	{ 0x0400, 0x052c },	/* ISP */
 	{ 0x0600, 0x06a0 },	/* DPM */
-	{ 0x081c, 0x0848 },	/* TSP */
+	{ 0x0750, 0x0750 },	/* DPM_MTILE_ABORTED, cleared before each TA kick */
+	{ 0x081c, 0x0848 },	/* TPU_YUV */
 	{ 0x0a5c, 0x0a64 },	/* EVENT_PIXEL_PDS_EXEC/DATA/INFO */
+	{ 0x0ae8, 0x0ae8 },	/* PDS_PP_INDEPENDANT_STATE */
 	{ 0x0c90, 0x0c90 },	/* BIF_TA_REQ_BASE */
 	{ 0x0cac, 0x0cb0 },	/* BIF_3D_REQ_BASE, BIF_ZLS_REQ_BASE */
-	{ 0x4320, 0x4320 },	/* master, as the DDK's 3D kick */
-	{ 0x4510, 0x451c },	/* master DPM, as the DDK's TA kick */
+	{ 0x4134, 0x4134 },	/* MASTER_EVENT_HOST_CLEAR, bits checked below */
+	{ 0x4320, 0x4320 },	/* MASTER_VDM_BATCH_NUM */
+	{ 0x435c, 0x435c },	/* MASTER_VDM_PIM */
+	{ 0x4368, 0x4368 },	/* MASTER_DPM_TASK_DPLIST */
+	{ 0x4370, 0x4370 },	/* MASTER_DPM_DPLIST_CLEAR_EVENT */
+	{ 0x4510, 0x451c },	/* MASTER_ISP_RGN_BASE1..3, MASTER_ISP_RGN */
+	{ 0x4800, 0x4800 },	/* MASTER_DPM_PROACTIVE_PIM_SPEC */
+	{ 0x480c, 0x480c },	/* MASTER_DPM_DRAIN_HEAP */
+};
+
+/*
+ * Per-core bank offsets (SGX_CORE_BANK(n) + off): what the DDK programs per
+ * core for a kick, the region and TPC bases and the TE state.
+ */
+static const u32 core_write_ok[] = {
+	0x021c,			/* TE_PSGREGION_BASE */
+	0x0220,			/* TE_TPC_BASE */
+	0x0274,			/* TE_STATE */
+	0x04c0,			/* ISP_VISREGBASE */
+	0x050c,			/* ISP_ZLS_EXTZ_RGN_BASE */
+	0x0ae8,			/* PDS_PP_INDEPENDANT_STATE */
 };
 
 /* What a render may wait on: status registers only. */
@@ -95,7 +118,24 @@ static const struct reg_range wait_ok[] = {
 	{ 0x0138, 0x0138 },	/* PDS_CACHE_STATUS */
 	{ 0x0600, 0x0730 },	/* DPM state and status */
 	{ 0x412c, 0x412c },	/* MASTER_EVENT_STATUS */
+	{ 0x4360, 0x4360 },	/* MASTER_VDM_PIM_STATUS */
+	{ 0x436c, 0x436c },	/* MASTER_DPM_DPLIST_EVENT_STATUS */
 };
+
+static bool core_reg_ok(u32 reg)
+{
+	unsigned int i;
+	u32 off;
+
+	if (reg < SGX_CORE_BANK(0) || reg >= SGX_CORE_BANK(PSP2SGX_NUM_CORES) ||
+	    reg & 3)
+		return false;
+	off = (reg - SGX_CORE_BANK(0)) & 0x3fff;
+	for (i = 0; i < ARRAY_SIZE(core_write_ok); i++)
+		if (off == core_write_ok[i])
+			return true;
+	return false;
+}
 
 static bool reg_in(const struct reg_range *r, unsigned int n, u32 reg)
 {
@@ -111,10 +151,11 @@ static bool reg_in(const struct reg_range *r, unsigned int n, u32 reg)
 
 static int check_write(u32 reg, u32 value)
 {
-	if (!reg_in(write_ok, ARRAY_SIZE(write_ok), reg))
+	if (!reg_in(write_ok, ARRAY_SIZE(write_ok), reg) && !core_reg_ok(reg))
 		return -EPERM;
 	/* the host owns the interrupts it has enabled */
-	if (reg == SGX_EVENT_HOST_CLEAR && value & SGX_EVENT_SW_EVENT)
+	if ((reg == SGX_EVENT_HOST_CLEAR || reg == SGX_MASTER_EVENT_HOST_CLEAR) &&
+	    value & SGX_EVENT_SW_EVENT)
 		return -EPERM;
 	if (reg == SGX_EVENT_HOST_CLEAR2 && value & 0xc00)
 		return -EPERM;
