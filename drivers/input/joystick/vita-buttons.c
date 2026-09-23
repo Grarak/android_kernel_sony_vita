@@ -9,6 +9,15 @@
 #include <linux/types.h>
 #include <linux/mfd/vita-syscon.h>
 
+/*
+ * Syscon command 0x101 answers four button bytes and four analog bytes (left
+ * stick x/y, right stick x/y, 0x80 at rest). The bits below are positions in
+ * the little-endian word of the button bytes. SceCtrl (ctrl.skprx 3.65,
+ * CtrlSysconPollDone at 0x81002314) moves them into its own layout and then
+ * XORs that with 0x4037fcf9: every button is active low except the bits of
+ * the last byte (headphone detect and two unknown ones). ACTIVE_LOW_MASK is
+ * the same inversion in this layout.
+ */
 #define CTRL_UP		BIT(0)
 #define CTRL_RIGHT	BIT(1)
 #define CTRL_DOWN	BIT(2)
@@ -27,6 +36,33 @@
 #define CTRL_VOLDOWN	BIT(17)
 #define CTRL_HEADPHONE	BIT(27)
 
+#define ACTIVE_LOW_MASK	0x00037fff
+
+#define STICK_FUZZ	2
+#define STICK_FLAT	12
+
+static const struct {
+	u32 bit;
+	unsigned int code;
+} vita_buttons_map[] = {
+	{ CTRL_UP,		BTN_DPAD_UP },
+	{ CTRL_DOWN,		BTN_DPAD_DOWN },
+	{ CTRL_LEFT,		BTN_DPAD_LEFT },
+	{ CTRL_RIGHT,		BTN_DPAD_RIGHT },
+	{ CTRL_CROSS,		BTN_SOUTH },	/* BTN_A */
+	{ CTRL_CIRCLE,		BTN_EAST },	/* BTN_B */
+	{ CTRL_SQUARE,		BTN_WEST },	/* BTN_Y (BTN_X is north) */
+	{ CTRL_TRIANGLE,	BTN_NORTH },
+	{ CTRL_LTRIGGER,	BTN_TL },
+	{ CTRL_RTRIGGER,	BTN_TR },
+	{ CTRL_SELECT,		BTN_SELECT },
+	{ CTRL_START,		BTN_START },
+	{ CTRL_PSBUTTON,	KEY_HOMEPAGE },
+	{ CTRL_VOLUP,		KEY_VOLUMEUP },
+	{ CTRL_VOLDOWN,		KEY_VOLUMEDOWN },
+	{ CTRL_POWER,		KEY_POWER },
+};
+
 struct vita_syscon_buttons {
 	struct vita_syscon *syscon;
 	struct input_dev *input;
@@ -36,52 +72,40 @@ struct vita_syscon_buttons {
 static void vita_syscon_buttons_poll(struct input_dev *input)
 {
 	struct vita_syscon_buttons *pad = input_get_drvdata(input);
-	u8 data[SYSCON_RX_HEADER_SIZE + 10 + 1];
+	u8 data[SYSCON_RX_HEADER_SIZE + 8 + 1];
+	u8 *payload = &data[SYSCON_RX_DATA];
 	u32 buttons;
-	int ret;
+	int i, ret;
 
-	// Packet 0x101 is 10 bytes long
-	// Packet 0x104 is 14 bytes long, includes arrows pressure
+	memset(data, 0, sizeof(data));
+
+	/* 0x104 would add the analog pressure of the arrow keys */
 	ret = pad->syscon->command_read(pad->syscon, 0x101, data, sizeof(data));
-	if (ret < 0)
+	if (ret < 0 || data[SYSCON_RX_LENGTH] < 8 + 2)
 		return;
 
-	buttons = (data[4] | (data[5] << 8) | (data[6] << 16) |
-		  (data[6] << 24)) ^ 0x4037fcf9;
+	buttons = (payload[0] | (payload[1] << 8) | (payload[2] << 16) |
+		   (payload[3] << 24)) ^ ACTIVE_LOW_MASK;
 
-	input_report_abs(input, ABS_X, data[8]);
-	input_report_abs(input, ABS_Y, data[9]);
-	input_report_abs(input, ABS_RX, data[10]);
-	input_report_abs(input, ABS_RY, data[11]);
-	input_report_key(input, BTN_DPAD_UP, buttons & CTRL_UP);
-	input_report_key(input, BTN_DPAD_DOWN, buttons & CTRL_DOWN);
-	input_report_key(input, BTN_DPAD_LEFT, buttons & CTRL_LEFT);
-	input_report_key(input, BTN_DPAD_RIGHT, buttons & CTRL_RIGHT);
-	input_report_key(input, BTN_X, buttons & CTRL_SQUARE);
-	input_report_key(input, BTN_A, buttons & CTRL_CROSS);
-	input_report_key(input, BTN_B, buttons & CTRL_CIRCLE);
-	input_report_key(input, BTN_Y, buttons & CTRL_TRIANGLE);
-	input_report_key(input, BTN_TL, buttons & CTRL_LTRIGGER);
-	input_report_key(input, BTN_TR, buttons & CTRL_RTRIGGER);
-	input_report_key(input, BTN_SELECT, buttons & CTRL_SELECT);
-	input_report_key(input, BTN_START, buttons & CTRL_START);
-	input_report_key(input, BTN_MODE, buttons & CTRL_PSBUTTON);
-	input_report_key(input, KEY_VOLUMEUP, buttons & CTRL_VOLUP);
-	input_report_key(input, KEY_VOLUMEDOWN, buttons & CTRL_VOLDOWN);
-	input_report_key(input, KEY_POWER, buttons & CTRL_POWER);
+	input_report_abs(input, ABS_X, payload[4]);
+	input_report_abs(input, ABS_Y, payload[5]);
+	input_report_abs(input, ABS_RX, payload[6]);
+	input_report_abs(input, ABS_RY, payload[7]);
+
+	for (i = 0; i < ARRAY_SIZE(vita_buttons_map); i++)
+		input_report_key(input, vita_buttons_map[i].code,
+				 !!(buttons & vita_buttons_map[i].bit));
 
 	input_sync(input);
 }
 
 static int vita_syscon_buttons_probe(struct platform_device *pdev)
 {
-	int err;
+	int err, i;
 	struct vita_syscon_buttons *pad;
 	struct input_dev *idev;
 	struct device *dev = &pdev->dev;
 	struct vita_syscon *syscon = dev_get_drvdata(dev->parent);
-
-	pr_info("vita_syscon_buttons_probe\n");
 
 	pad = devm_kzalloc(dev, sizeof(struct vita_syscon_buttons), GFP_KERNEL);
 	if (!pad)
@@ -96,31 +120,18 @@ static int vita_syscon_buttons_probe(struct platform_device *pdev)
 
 	pad->input = idev;
 	input_set_drvdata(idev, pad);
-	idev->name = "PlayStation Vita Buttons (Syscon)";
+	idev->name = "Vita Buttons";
 	idev->phys = "vita_syscon_buttons";
 	idev->dev.parent = pad->dev;
 	idev->id.bustype = BUS_SPI;
 
-	input_set_abs_params(idev, ABS_X, 0, 255, 0, 0);
-	input_set_abs_params(idev, ABS_Y, 0, 255, 0, 0);
-	input_set_abs_params(idev, ABS_RX, 0, 255, 0, 0);
-	input_set_abs_params(idev, ABS_RY, 0, 255, 0, 0);
-	input_set_capability(idev, EV_KEY, BTN_DPAD_UP);
-	input_set_capability(idev, EV_KEY, BTN_DPAD_DOWN);
-	input_set_capability(idev, EV_KEY, BTN_DPAD_LEFT);
-	input_set_capability(idev, EV_KEY, BTN_DPAD_RIGHT);
-	input_set_capability(idev, EV_KEY, BTN_A);
-	input_set_capability(idev, EV_KEY, BTN_B);
-	input_set_capability(idev, EV_KEY, BTN_X);
-	input_set_capability(idev, EV_KEY, BTN_Y);
-	input_set_capability(idev, EV_KEY, BTN_TL);
-	input_set_capability(idev, EV_KEY, BTN_TR);
-	input_set_capability(idev, EV_KEY, BTN_SELECT);
-	input_set_capability(idev, EV_KEY, BTN_START);
-	input_set_capability(idev, EV_KEY, BTN_MODE);
-	input_set_capability(idev, EV_KEY, KEY_VOLUMEUP);
-	input_set_capability(idev, EV_KEY, KEY_VOLUMEDOWN);
-	input_set_capability(idev, EV_KEY, KEY_POWER);
+	input_set_abs_params(idev, ABS_X, 0, 255, STICK_FUZZ, STICK_FLAT);
+	input_set_abs_params(idev, ABS_Y, 0, 255, STICK_FUZZ, STICK_FLAT);
+	input_set_abs_params(idev, ABS_RX, 0, 255, STICK_FUZZ, STICK_FLAT);
+	input_set_abs_params(idev, ABS_RY, 0, 255, STICK_FUZZ, STICK_FLAT);
+
+	for (i = 0; i < ARRAY_SIZE(vita_buttons_map); i++)
+		input_set_capability(idev, EV_KEY, vita_buttons_map[i].code);
 
 	err = input_setup_polling(idev, vita_syscon_buttons_poll);
 	if (err) {
