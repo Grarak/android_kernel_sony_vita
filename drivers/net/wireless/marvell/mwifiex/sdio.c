@@ -3019,11 +3019,22 @@ static void mwifiex_sdio_work(struct work_struct *work)
 	struct sdio_mmc_card *card =
 		container_of(work, struct sdio_mmc_card, work);
 
+	/*
+	 * A dump or reset queued before the adapter was unregistered (firmware
+	 * that stopped answering, then a failed init) finds card->adapter NULL:
+	 * seen on the Vita's SD8787, where it oopsed in the reset.
+	 */
+	if (!card->adapter) {
+		clear_bit(MWIFIEX_IFACE_WORK_DEVICE_DUMP, &card->work_flags);
+		clear_bit(MWIFIEX_IFACE_WORK_CARD_RESET, &card->work_flags);
+		pr_warn("mwifiex_sdio: dump/reset work without an adapter, skipped\n");
+		return;
+	}
 	if (test_and_clear_bit(MWIFIEX_IFACE_WORK_DEVICE_DUMP,
 			       &card->work_flags))
 		mwifiex_sdio_device_dump_work(card->adapter);
 	if (test_and_clear_bit(MWIFIEX_IFACE_WORK_CARD_RESET,
-			       &card->work_flags))
+			       &card->work_flags) && card->adapter)
 		mwifiex_sdio_card_reset_work(card->adapter);
 }
 
