@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * "earlyfb" on the command line: the kernel log on the boot loader's
- * framebuffer from the start of init_early, for a console with no UART to
- * read.  The framebuffer console only takes over once simplefb probes; a
- * kernel that stops before then leaves the boot loader's screen as it was.
+ * framebuffer from paging_init on, for a console with no UART to read.
+ * The framebuffer console only takes over once simplefb probes; a kernel
+ * that stops before then leaves the boot loader's screen as it was.
  *
- * The framebuffer is mapped statically (.map_io), so the console works from
- * init_early, right after paging_init, and replays the log from the first
- * line.  Lines wrap from the bottom back to the top rather than scroll, which
- * would move 2 MiB of uncached memory per line.  It is a boot console: it
- * stops when ttyS0 registers, after fbcon has taken the screen over.
+ * The framebuffer is mapped statically (.map_io) and the console registers
+ * right there, in the middle of paging_init, so an oops or panic from then on
+ * is on the screen; it replays the log from the first line.  Until the device
+ * tree is unflattened (init_early) it assumes the Vita's 960x544 panel.
+ * Lines wrap from the bottom back to the top rather than scroll, which would
+ * move 2 MiB of uncached memory per line.  It is a boot console: it stops
+ * when ttyS0 registers, after fbcon has taken the screen over.
  */
 
 #include <linux/console.h>
@@ -108,8 +110,18 @@ void __init vita_earlyfb_map_io(void)
 		.type		= MT_DEVICE_WC,
 	};
 
-	if (earlyfb_enabled)
-		iotable_init(&desc, 1);
+	if (!earlyfb_enabled)
+		return;
+
+	iotable_init(&desc, 1);
+	earlyfb_base = (u32 __iomem *)EARLYFB_VIRT;
+	earlyfb_cols = earlyfb_width / earlyfb_font->width;
+	earlyfb_rows = earlyfb_height / earlyfb_font->height;
+	for (earlyfb_y = 0; earlyfb_y < earlyfb_rows; earlyfb_y++)
+		earlyfb_fill_row(earlyfb_y, EARLYFB_BG);
+	earlyfb_y = 0;
+
+	register_console(&earlyfb_console);
 }
 
 void __init vita_earlyfb_init(void)
@@ -120,6 +132,7 @@ void __init vita_earlyfb_init(void)
 	if (!earlyfb_enabled)
 		return;
 
+	/* Running since .map_io with the panel's size: take the DT's (one CPU, IRQs off) */
 	np = of_find_compatible_node(NULL, NULL, "simple-framebuffer");
 	if (np && !of_property_read_u32(np, "width", &width) &&
 	    !of_property_read_u32(np, "height", &height) &&
@@ -131,12 +144,8 @@ void __init vita_earlyfb_init(void)
 	}
 	of_node_put(np);
 
-	earlyfb_base = (u32 __iomem *)EARLYFB_VIRT;
 	earlyfb_cols = earlyfb_width / earlyfb_font->width;
 	earlyfb_rows = earlyfb_height / earlyfb_font->height;
-	for (earlyfb_y = 0; earlyfb_y < earlyfb_rows; earlyfb_y++)
-		earlyfb_fill_row(earlyfb_y, EARLYFB_BG);
-	earlyfb_y = 0;
-
-	register_console(&earlyfb_console);
+	if (earlyfb_y >= earlyfb_rows)
+		earlyfb_y = 0;
 }
