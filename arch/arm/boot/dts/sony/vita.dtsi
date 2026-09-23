@@ -369,11 +369,17 @@
 		 * [WIKI SceKernelIntrMgr]. There is no open SGX543 driver, so Android
 		 * renders in software.
 		 */
+		/*
+		 * Bank 0 at +0, the multi-core master at +0x4000 and core n at
+		 * +0x8000 + n * 0x4000: 0x20000 bytes.  The power domain is
+		 * switched by the secure monitor's SMC 0x110 on bus 0.
+		 */
 		gpu: gpu@e8400000 {
 			compatible = "sony,vita-gpu", "img,powervr-sgx543";
-			reg = <0xe8400000 0x10000>;
+			reg = <0xe8400000 0x20000>;
 			interrupts = <GIC_SPI 20 IRQ_TYPE_LEVEL_HIGH>;
-			status = "disabled";
+			sony,power-smc = <0x110 0>;
+			status = "okay";
 		};
 	};
 
