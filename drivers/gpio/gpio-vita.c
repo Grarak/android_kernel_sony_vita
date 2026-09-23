@@ -45,6 +45,19 @@ struct vita_gpio_chip {
 	struct reset_control    *rst;
 };
 
+/*
+ * Clears the line's latched status (write one to clear, as the chained
+ * handler does after each line). handle_edge_irq() calls this before the
+ * handler runs and has no NULL check.
+ */
+static void vita_gpio_irq_ack(struct irq_data *d)
+{
+	struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
+	struct vita_gpio_chip *vgpio = gpiochip_get_data(chip);
+
+	iowrite32(BIT(d->hwirq), vgpio->regs + VITA_GPIO_INT_STATUS_GATE0);
+}
+
 static void vita_gpio_irq_mask(struct irq_data *d)
 {
 	struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
@@ -155,6 +168,7 @@ static void vita_gpio_irq_handler(struct irq_desc *desc)
 
 static const struct irq_chip vita_gpio_irqchip = {
 	.name		= "vita-gpio",
+	.irq_ack	= vita_gpio_irq_ack,
 	.irq_mask	= vita_gpio_irq_mask,
 	.irq_unmask	= vita_gpio_irq_unmask,
 	.irq_set_type	= vita_gpio_irq_set_type,
