@@ -10,10 +10,12 @@
  * powered, in parallel-4 mode and unlocked. This driver never resets the
  * controller or the card.
  *
- * Data moves by PIO through the TPC FIFO, one 512-byte sector per card
- * command, following libbaremetal's msif_read_sector(), the sequence the
- * bare-metal Linux loader uses on hardware. Writes mirror it with
- * MSPRO_CMD_WRITE_DATA / WRITE_LONG_DATA. That is the standard Memory Stick
+ * Data moves by PIO through the TPC FIFO. One card command covers a run of
+ * contiguous card sectors (up to a whole request within one extent): the
+ * card raises BREQ before each 512-byte READ_LONG_DATA / WRITE_LONG_DATA and
+ * CED after the last, the Memory Stick PRO flow of Linux's mspro_block. With
+ * a count of one it is libbaremetal's msif_read_sector(), the sequence the
+ * bare-metal Linux loader uses on hardware. That is the standard Memory Stick
  * PRO flow, but it has not been checked on hardware, so writes are off
  * unless vita_msif.writable=1.
  *
@@ -246,11 +248,12 @@ static void ms_stop(struct vita_msif *ms)
 		ms_wait_int(ms, MS_INT_REG_CED);
 }
 
-/* One sector: the libbaremetal msif_read_sector() sequence, bounded. */
-static int ms_xfer_sector(struct vita_msif *ms, u8 cmd, u32 sector,
-			  void *buf, bool write)
+/*
+ * Starts @cmd for @count sectors from @sector: EX_SET_CMD, then the card's
+ * BREQ for the first sector.
+ */
+static int ms_cmd_start(struct vita_msif *ms, u8 cmd, u32 sector, u16 count)
 {
-	const u32 count = 1;
 	u8 data[7] = {
 		cmd, (count >> 8) & 0xFF, count & 0xFF,
 		(sector >> 24) & 0xFF, (sector >> 16) & 0xFF,
@@ -266,8 +269,13 @@ static int ms_xfer_sector(struct vita_msif *ms, u8 cmd, u32 sector,
 		ret = ms_wait_status(ms, MSIF_STATUS_UNK1, 0);
 	if (!ret)
 		ret = ms_wait_int(ms, MS_INT_REG_BREQ);
-	if (ret)
-		goto err;
+	return ret;
+}
+
+/* One sector of a started command; the card then asks for the next (BREQ) or ends (CED). */
+static int ms_cmd_page(struct vita_msif *ms, void *buf, bool write, bool last)
+{
+	int ret;
 
 	if (write) {
 		ms_tpc(ms, MS_TPC_WRITE_LONG_DATA, MS_SECTOR_SIZE);
@@ -281,28 +289,50 @@ static int ms_xfer_sector(struct vita_msif *ms, u8 cmd, u32 sector,
 	if (!ret)
 		ret = ms_wait_status(ms, MSIF_STATUS_UNK1, 0);
 	if (!ret)
-		ret = ms_wait_int(ms, MS_INT_REG_CED);
-	if (!ret)
-		return 0;
-err:
-	dev_err_ratelimited(ms->dev, "%s of sector %u failed: %d\n",
-			    write ? "write" : "read", sector, ret);
-	ms_stop(ms);
+		ret = ms_wait_int(ms, last ? MS_INT_REG_CED : MS_INT_REG_BREQ);
 	return ret;
 }
 
-/* The card sector behind @sector of @md, or U32_MAX past its end. */
-static u32 vita_msif_map(struct vita_msif_disk *md, sector_t sector)
+static void ms_xfer_failed(struct vita_msif *ms, bool write, u32 sector, int ret)
+{
+	dev_err_ratelimited(ms->dev, "%s of sector %u failed: %d\n",
+			    write ? "write" : "read", sector, ret);
+	ms_stop(ms);
+}
+
+/* One sector as its own command: the libbaremetal msif_read_sector() sequence. */
+static int ms_xfer_sector(struct vita_msif *ms, u8 cmd, u32 sector,
+			  void *buf, bool write)
+{
+	int ret = ms_cmd_start(ms, cmd, sector, 1);
+
+	if (!ret)
+		ret = ms_cmd_page(ms, buf, write, true);
+	if (ret)
+		ms_xfer_failed(ms, write, sector, ret);
+	return ret;
+}
+
+/*
+ * The card sector behind @sector of @md, or U32_MAX past its end; *@run is
+ * how many sectors from there on are contiguous on the card.
+ */
+static u32 vita_msif_map(struct vita_msif_disk *md, sector_t sector, u32 *run)
 {
 	unsigned int i;
 
-	if (!md->extents)
+	if (!md->extents) {
+		*run = sector < U32_MAX ? U32_MAX - (u32)sector : 0;
 		return sector < U32_MAX ? sector : U32_MAX;
+	}
 	for (i = 0; i < md->nr_extents; i++) {
-		if (sector < md->extents[i].count)
+		if (sector < md->extents[i].count) {
+			*run = md->extents[i].count - sector;
 			return md->extents[i].start + sector;
+		}
 		sector -= md->extents[i].count;
 	}
+	*run = 0;
 	return U32_MAX;
 }
 
@@ -317,6 +347,8 @@ static blk_status_t vita_msif_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct req_iterator iter;
 	struct bio_vec bvec;
 	blk_status_t status = BLK_STS_OK;
+	u32 remaining = blk_rq_sectors(rq);
+	u32 card_sector = 0, left = 0;	/* sectors left in the open card command */
 
 	blk_mq_start_request(rq);
 
@@ -343,12 +375,34 @@ static blk_status_t vita_msif_queue_rq(struct blk_mq_hw_ctx *hctx,
 		unsigned int off;
 
 		for (off = 0; off < bvec.bv_len; off += MS_SECTOR_SIZE) {
-			u32 card_sector = vita_msif_map(md, sector++);
+			int err = 0;
 
-			if (card_sector == U32_MAX ||
-			    ms_xfer_sector(ms, write ? MSPRO_CMD_WRITE_DATA :
-					   MSPRO_CMD_READ_DATA,
-					   card_sector, buf + off, write)) {
+			if (!left) {
+				/* the next run: one command for as far as the card sectors go on */
+				u32 run;
+
+				card_sector = vita_msif_map(md, sector, &run);
+				left = min3(run, remaining, (u32)U16_MAX);
+				if (card_sector == U32_MAX || !left) {
+					err = -EIO;
+				} else {
+					err = ms_cmd_start(ms, write ? MSPRO_CMD_WRITE_DATA :
+							   MSPRO_CMD_READ_DATA, card_sector, left);
+					if (err)
+						ms_xfer_failed(ms, write, card_sector, err);
+				}
+			} else {
+				card_sector++;
+			}
+			if (!err && left) {
+				err = ms_cmd_page(ms, buf + off, write, left == 1);
+				if (err)
+					ms_xfer_failed(ms, write, card_sector, err);
+				left--;
+			}
+			sector++;
+			remaining--;
+			if (err) {
 				status = BLK_STS_IOERR;
 				break;
 			}
@@ -451,7 +505,7 @@ static int vita_msif_add_disk(struct vita_msif *ms, struct vita_msif_disk *md,
 {
 	struct queue_limits lim = {
 		.logical_block_size	= MS_SECTOR_SIZE,
-		.max_hw_sectors		= 128,
+		.max_hw_sectors		= 1024,
 	};
 	int ret;
 
