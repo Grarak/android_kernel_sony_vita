@@ -1,16 +1,28 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2021 Sergi Granell
+/*
+ * PlayStation Vita front touch screen and rear touch pad, read through the
+ * Syscon (Ernie).
+ *
+ * Syscon command 0x300 + port (1 front, 2 rear) returns one panel's report:
+ * 0x3c bytes of six-byte contacts (id, whose bit 7 marks an empty slot;
+ * 11-bit x; 11-bit y; force). SceTouch (touch.skprx 3.65, the report decoder
+ * at 0x81004510) clamps the front panel to 0..1919 x 0..1087, twice the
+ * 960x544 screen, and the rear one to x 0..1919 and raw y 0..781, which it
+ * shifts by 108 into the front panel's frame.
+ */
 
 #include <linux/bitops.h>
+#include <linux/delay.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/mfd/vita-syscon.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/regmap.h>
 #include <linux/input/touchscreen.h>
 
 #define TOUCH_PORT_FRONT (1 << 0)
@@ -20,7 +32,16 @@
 #define TOUCH_MAX_REPORT_BACK  4
 
 #define TOUCH_REPORT_DATA_SIZE      (0x7a - 2)
-#define TOUCH_REPORT_PORT_ENTRIES   10
+
+#define TOUCH_FRONT_MAX_X	1919
+#define TOUCH_FRONT_MAX_Y	1087
+#define TOUCH_BACK_MAX_X	1919
+#define TOUCH_BACK_MAX_Y	781
+#define TOUCH_FORCE_MAX		255
+
+static bool rear = true;
+module_param(rear, bool, 0444);
+MODULE_PARM_DESC(rear, "Report the rear touch pad as a second input device");
 
 struct syscon_touchpanel_device_info {
 	u16 front_vendor_id;
@@ -62,10 +83,14 @@ struct vita_vendor_data {
 
 struct vita_syscon_ts {
 	struct vita_syscon *syscon;
-	struct input_dev *input;
+	struct input_dev *input;	/* front touch screen */
+	struct input_dev *rear_input;	/* rear touch pad, if enabled */
 	struct device *dev;
 	struct vita_vendor_data vendor;
 	struct touchscreen_properties prop;
+	struct mutex lock;		/* serialises open/close */
+	unsigned int users;
+	int port_mask;
 };
 
 struct touch_finger {
@@ -73,13 +98,6 @@ struct touch_finger {
 	u8 force;
 	u16 x; // 11 bits
 	u16 y; // 11 bits
-};
-
-struct touch_report {
-	int num_front;
-	int num_back;
-	struct touch_finger front[TOUCH_MAX_REPORT_FRONT];
-	struct touch_finger back[TOUCH_MAX_REPORT_BACK];
 };
 
 static int syscon_ctrl_device_reset(struct vita_syscon *syscon, unsigned int param_1,
@@ -249,13 +267,13 @@ static int touch_init(struct vita_syscon_ts *ts)
 	if (ret < 0)
 		return ret;
 
-	udelay(1000);
+	usleep_range(1000, 2000);
 
 	ret = syscon_ctrl_device_reset(syscon, 0xC, 1);
 	if (ret < 0)
 		return ret;
 
-	mdelay(100);
+	msleep(100);
 
 	if (baryon_version < 0x1000600) {
 		ret = touch_read_panel_info_1(syscon, &ts->vendor.front, &ts->vendor.back);
@@ -364,96 +382,186 @@ static inline bool touch_parse_finger(struct touch_finger *finger, const u8 *dat
 	return true;
 }
 
-static int touch_read(struct vita_syscon_ts *ts, int port_mask, struct touch_report *report)
+/*
+ * Reads one panel's contacts (port TOUCH_PORT_FRONT or TOUCH_PORT_BACK) with
+ * command 0x301 or 0x302. Only the bytes the reply actually carries (its
+ * length field counts the result byte, the data and the checksum) are
+ * parsed, so a short reply means no contacts rather than stale buffer data.
+ */
+static int touch_read_port(struct vita_syscon_ts *ts, int port,
+			   struct touch_finger *fingers, int max_fingers)
 {
 	struct vita_syscon *syscon = ts->syscon;
 	u8 buffer[SYSCON_RX_HEADER_SIZE + TOUCH_REPORT_DATA_SIZE + 1];
 	u8 *raw_data = &buffer[SYSCON_RX_DATA];
-	struct touch_finger *finger;
-	int offset;
-	u8 cmd_lo;
+	int data_len, offset, count = 0;
 	int i, ret;
 
-	if ((port_mask & 3) == 3)
-		cmd_lo = 0;
-	else
-		cmd_lo = port_mask & 3;
+	memset(buffer, 0, sizeof(buffer));
 
-	ret = syscon->command_read(syscon, 0x300 + cmd_lo, buffer, sizeof(buffer));
+	ret = syscon->command_read(syscon, 0x300 + port, buffer, sizeof(buffer));
 	if (ret < 0)
 		return ret;
 
-	report->num_front = 0;
-	if (port_mask & TOUCH_PORT_FRONT) {
-		offset = 0;
-		for (i = 0; i < TOUCH_MAX_REPORT_FRONT; i++) {
-			finger = &report->front[report->num_front];
+	if (buffer[SYSCON_RX_RESULT] & 0x20)	/* command error */
+		return 0;
 
-			if (touch_parse_finger(finger, &raw_data[offset]))
-				report->num_front++;
+	data_len = (int)buffer[SYSCON_RX_LENGTH] - 2;
+	data_len = clamp(data_len, 0, TOUCH_REPORT_DATA_SIZE);
 
-			offset += 6;
-		}
+	for (i = 0, offset = 0; i < max_fingers && offset + 6 <= data_len;
+	     i++, offset += 6) {
+		if (touch_parse_finger(&fingers[count], &raw_data[offset]))
+			count++;
 	}
 
-	report->num_back = 0;
-	if (port_mask & TOUCH_PORT_BACK) {
-		offset = TOUCH_REPORT_PORT_ENTRIES * 6;
-		for (i = 0; i < TOUCH_MAX_REPORT_BACK; i++) {
-			finger = &report->back[report->num_back];
-
-			if (touch_parse_finger(finger, &raw_data[offset]))
-				report->num_back++;
-
-			offset += 6;
-		}
-	}
-
-	return 0;
+	return count;
 }
 
-static void vita_syscon_ts_poll(struct input_dev *input_dev)
+static void vita_syscon_ts_report(struct input_dev *input_dev,
+				  const struct touch_finger *fingers, int count,
+				  int max_x, int max_y)
 {
-	struct vita_syscon_ts *ts = input_get_drvdata(input_dev);
-	struct touch_report touch;
-	int i, ret;
+	int i, slot;
 
-	ret = touch_read(ts, TOUCH_PORT_FRONT, &touch);
-	if (ret < 0)
-		return;
+	for (i = 0; i < count; i++) {
+		/* The panel's contact id tracks a finger across reports */
+		slot = input_mt_get_slot_by_key(input_dev, fingers[i].id);
+		if (slot < 0)
+			continue;
 
-	for (i = 0; i < touch.num_front; i++) {
-		input_mt_slot(input_dev, i);
+		input_mt_slot(input_dev, slot);
 		input_mt_report_slot_state(input_dev, MT_TOOL_FINGER, true);
-		input_report_abs(input_dev, ABS_MT_POSITION_X, touch.front[i].x);
-		input_report_abs(input_dev, ABS_MT_POSITION_Y, touch.front[i].y);
-		input_report_abs(input_dev, ABS_MT_PRESSURE, touch.front[i].force);
+		input_report_abs(input_dev, ABS_MT_POSITION_X,
+				 min_t(int, fingers[i].x, max_x));
+		input_report_abs(input_dev, ABS_MT_POSITION_Y,
+				 min_t(int, fingers[i].y, max_y));
+		input_report_abs(input_dev, ABS_MT_PRESSURE, fingers[i].force);
 	}
 
 	input_mt_sync_frame(input_dev);
 	input_sync(input_dev);
 }
 
+static void vita_syscon_ts_poll(struct input_dev *input_dev)
+{
+	struct vita_syscon_ts *ts = input_get_drvdata(input_dev);
+	struct touch_finger fingers[TOUCH_MAX_REPORT_FRONT];
+	int count;
+
+	count = touch_read_port(ts, TOUCH_PORT_FRONT, fingers,
+				TOUCH_MAX_REPORT_FRONT);
+	if (count < 0)
+		return;
+
+	vita_syscon_ts_report(input_dev, fingers, count,
+			      TOUCH_FRONT_MAX_X, TOUCH_FRONT_MAX_Y);
+}
+
+static void vita_syscon_ts_rear_poll(struct input_dev *input_dev)
+{
+	struct vita_syscon_ts *ts = input_get_drvdata(input_dev);
+	struct touch_finger fingers[TOUCH_MAX_REPORT_BACK];
+	int count;
+
+	count = touch_read_port(ts, TOUCH_PORT_BACK, fingers,
+				TOUCH_MAX_REPORT_BACK);
+	if (count < 0)
+		return;
+
+	vita_syscon_ts_report(input_dev, fingers, count,
+			      TOUCH_BACK_MAX_X, TOUCH_BACK_MAX_Y);
+}
+
+static int vita_syscon_ts_start(struct vita_syscon_ts *ts)
+{
+	int ret;
+
+	ret = touch_configure(ts, ts->port_mask, TOUCH_MAX_REPORT_FRONT,
+			      (ts->port_mask & TOUCH_PORT_BACK) ?
+			      TOUCH_MAX_REPORT_BACK : 0);
+	if (ret < 0)
+		return ret;
+
+	return touch_set_sampling_cycle(ts, ts->port_mask, 0xFF,
+					(ts->port_mask & TOUCH_PORT_BACK) ?
+					0xFF : 0);
+}
+
+/*
+ * Both input devices share the panels' Syscon device (reset line 0xC): it is
+ * released when the first of them is opened and held in reset after the last
+ * one is closed.
+ */
 static int vita_syscon_ts_open(struct input_dev *input)
 {
 	struct vita_syscon_ts *ts = input_get_drvdata(input);
+	int ret = 0;
 
-	//pr_info("vita_syscon_ts_open\n");
+	mutex_lock(&ts->lock);
+	if (ts->users++ == 0) {
+		syscon_ctrl_device_reset(ts->syscon, 0xC, 1);
+		msleep(100);
+		ret = vita_syscon_ts_start(ts);
+		if (ret < 0)
+			ts->users--;
+	}
+	mutex_unlock(&ts->lock);
 
-	syscon_ctrl_device_reset(ts->syscon, 0xC, 1);
-	mdelay(100);
-
-	return 0;
+	return ret < 0 ? ret : 0;
 }
 
 static void vita_syscon_ts_close(struct input_dev *input)
 {
 	struct vita_syscon_ts *ts = input_get_drvdata(input);
 
-	//pr_info("vita_syscon_ts_close\n");
+	mutex_lock(&ts->lock);
+	if (--ts->users == 0) {
+		syscon_ctrl_device_reset(ts->syscon, 0xC, 0);
+		usleep_range(1000, 2000);
+	}
+	mutex_unlock(&ts->lock);
+}
 
-	syscon_ctrl_device_reset(ts->syscon, 0xC, 0);
-	udelay(1000);
+static struct input_dev *vita_syscon_ts_alloc(struct vita_syscon_ts *ts,
+					      const char *name, const char *phys,
+					      int max_x, int max_y,
+					      int max_contacts, unsigned int mt_flags,
+					      void (*poll)(struct input_dev *))
+{
+	struct input_dev *input_dev;
+	int ret;
+
+	input_dev = devm_input_allocate_device(ts->dev);
+	if (!input_dev)
+		return ERR_PTR(-ENOMEM);
+
+	input_set_drvdata(input_dev, ts);
+
+	input_dev->name = name;
+	input_dev->phys = phys;
+	input_dev->dev.parent = ts->dev;
+	input_dev->id.bustype = BUS_SPI;
+	input_dev->open = vita_syscon_ts_open;
+	input_dev->close = vita_syscon_ts_close;
+
+	input_set_abs_params(input_dev, ABS_MT_POSITION_X, 0, max_x, 0, 0);
+	input_set_abs_params(input_dev, ABS_MT_POSITION_Y, 0, max_y, 0, 0);
+	input_set_abs_params(input_dev, ABS_MT_PRESSURE, 0, TOUCH_FORCE_MAX, 0, 0);
+
+	ret = input_mt_init_slots(input_dev, max_contacts, mt_flags);
+	if (ret) {
+		dev_err(ts->dev, "Failed to initialize MT slots: %d\n", ret);
+		return ERR_PTR(ret);
+	}
+
+	ret = input_setup_polling(input_dev, poll);
+	if (ret)
+		return ERR_PTR(ret);
+
+	input_set_poll_interval(input_dev, 16);
+
+	return input_dev;
 }
 
 static int vita_syscon_ts_probe(struct platform_device *pdev)
@@ -464,66 +572,58 @@ static int vita_syscon_ts_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct vita_syscon *syscon = dev_get_drvdata(dev->parent);
 
-	pr_info("vita_syscon_ts_probe\n");
-
 	ts = devm_kzalloc(dev, sizeof(struct vita_syscon_ts), GFP_KERNEL);
 	if (!ts)
 		return -ENOMEM;
 
 	ts->syscon = syscon;
 	ts->dev = dev;
+	mutex_init(&ts->lock);
+	ts->port_mask = TOUCH_PORT_FRONT | (rear ? TOUCH_PORT_BACK : 0);
 
-	input_dev = devm_input_allocate_device(dev);
-	if (!input_dev)
-		return -ENOMEM;
-
+	/* Front: a direct touch screen over the display */
+	input_dev = vita_syscon_ts_alloc(ts, "Vita Front Touchscreen",
+					 "vita_syscon_ts/input0",
+					 TOUCH_FRONT_MAX_X, TOUCH_FRONT_MAX_Y,
+					 TOUCH_MAX_REPORT_FRONT,
+					 INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED,
+					 vita_syscon_ts_poll);
+	if (IS_ERR(input_dev))
+		return PTR_ERR(input_dev);
 	ts->input = input_dev;
-	input_set_drvdata(input_dev, ts);
-
-	input_dev->name = "PlayStation Vita Touchscreen (Syscon)";
-	input_dev->phys = "vita_syscon_ts";
-	input_dev->dev.parent = ts->dev;
-	input_dev->id.bustype = BUS_SPI;
-	input_dev->open = vita_syscon_ts_open;
-	input_dev->close = vita_syscon_ts_close;
-
-	input_set_abs_params(input_dev, ABS_MT_POSITION_X, 0, 1920, 0, 0);
-	input_set_abs_params(input_dev, ABS_MT_POSITION_Y, 0, 1080, 0, 0);
-	input_set_abs_params(input_dev, ABS_MT_PRESSURE, 0, 255, 0, 0);
 
 	touchscreen_parse_properties(input_dev, true, &ts->prop);
 
-	ret = input_mt_init_slots(input_dev, TOUCH_MAX_REPORT_FRONT,
-				  INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
-	if (ret) {
-		dev_err(dev, "Failed to initialize MT slots: %d\n", ret);
-		return ret;
+	/* Rear: an indirect multi-touch pad */
+	if (rear) {
+		input_dev = vita_syscon_ts_alloc(ts, "Vita Rear Touchpad",
+						 "vita_syscon_ts/input1",
+						 TOUCH_BACK_MAX_X, TOUCH_BACK_MAX_Y,
+						 TOUCH_MAX_REPORT_BACK,
+						 INPUT_MT_POINTER | INPUT_MT_DROP_UNUSED,
+						 vita_syscon_ts_rear_poll);
+		if (IS_ERR(input_dev))
+			return PTR_ERR(input_dev);
+		ts->rear_input = input_dev;
 	}
-
-	ret = input_setup_polling(input_dev, vita_syscon_ts_poll);
-	if (ret)
-		return ret;
-
-	input_set_poll_interval(input_dev, 16);
 
 	ret = touch_init(ts);
-	if (ret < 0) {
+	if (ret < 0)
 		return ret;
-	}
 
-	ret = touch_configure(ts, TOUCH_PORT_FRONT, TOUCH_MAX_REPORT_FRONT, 0);
-	if (ret < 0) {
+	ret = vita_syscon_ts_start(ts);
+	if (ret < 0)
 		return ret;
-	}
 
-	ret = touch_set_sampling_cycle(ts, TOUCH_PORT_FRONT, 0xFF, 0);
-	if (ret < 0) {
-		return ret;
-	}
-
-	ret = input_register_device(input_dev);
+	ret = input_register_device(ts->input);
 	if (ret)
 		return ret;
+
+	if (ts->rear_input) {
+		ret = input_register_device(ts->rear_input);
+		if (ret)
+			return ret;
+	}
 
 	return 0;
 }
