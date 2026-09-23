@@ -16,8 +16,8 @@
  * CED after the last, the Memory Stick PRO flow of Linux's mspro_block. With
  * a count of one it is libbaremetal's msif_read_sector(), the sequence the
  * bare-metal Linux loader uses on hardware. That is the standard Memory Stick
- * PRO flow, but it has not been checked on hardware, so writes are off
- * unless vita_msif.writable=1.
+ * PRO flow; Android's /data, /cache and sdcard depend on it.  Only the
+ * card's own write protection makes it read-only.
  *
  * Register offsets: libbaremetal src/msif.c.
  *
@@ -86,10 +86,6 @@
 /* SCE master block (wiki.henkaku.xyz Partitions) */
 #define SCE_MBR_MAGIC		"Sony Computer Entertainment Inc."
 #define SCE_MBR_DEVICE_SIZE	0x24
-
-static bool writable;
-module_param(writable, bool, 0444);
-MODULE_PARM_DESC(writable, "Allow writes to the memory card (untested on hardware)");
 
 struct vita_msif_extent {
 	u32 start;
@@ -356,7 +352,7 @@ static blk_status_t vita_msif_queue_rq(struct blk_mq_hw_ctx *hctx,
 	case REQ_OP_READ:
 		break;
 	case REQ_OP_WRITE:
-		if (ms->wp || !writable) {
+		if (ms->wp) {
 			status = BLK_STS_PROTECTION;
 			goto out;
 		}
@@ -532,7 +528,7 @@ static int vita_msif_add_disk(struct vita_msif *ms, struct vita_msif_disk *md,
 	md->disk->minors = VITA_MSIF_MINORS;
 	strscpy(md->disk->disk_name, name, sizeof(md->disk->disk_name));
 	set_capacity(md->disk, capacity);
-	if (ms->wp || !writable)
+	if (ms->wp)
 		set_disk_ro(md->disk, true);
 
 	/*
@@ -546,7 +542,7 @@ static int vita_msif_add_disk(struct vita_msif *ms, struct vita_msif_disk *md,
 	dev_info(ms->dev, "%s: %llu sectors (%llu MiB) in %u extent(s)%s\n",
 		 name, (unsigned long long)capacity,
 		 (unsigned long long)capacity >> 11, md->nr_extents ?: 1,
-		 ms->wp ? ", write-protected" : (writable ? "" : ", read-only"));
+		 ms->wp ? ", write-protected" : "");
 	return 0;
 
 err_disk:

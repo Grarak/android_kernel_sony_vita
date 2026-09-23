@@ -29,6 +29,7 @@
 
 	aliases {
 		serial0 = &uart0;
+		serial1 = &uart1;
 		/* Fixed MMC numbering: mmc0 is always the eMMC, mmc1 the game card slot */
 		mmc0 = &sdif0;
 		mmc1 = &sdif1;
@@ -312,6 +313,18 @@
 		uart0: serial@e2030000 {
 			compatible = "vita,vita-uart";
 			reg = <0xe2030000 0x10000>;
+		};
+
+		/*
+		 * UART1: on a DevKit, the line to the CP board, whose dfcpm opens
+		 * it as its ttyS1 (115200 8N1) and relays the text to the PC over
+		 * the mini-USB port as DECI4p console output (protocol
+		 * 0x80030081).  The bootloader clocks and initialises it; polled
+		 * like UART0.
+		 */
+		uart1: serial@e2040000 {
+			compatible = "vita,vita-uart";
+			reg = <0xe2040000 0x10000>;
 		};
 
 		/* GPIO0: port mode register 1 = output [WIKI GPIO_Registers] */

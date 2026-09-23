@@ -17,6 +17,7 @@
 #include <linux/console.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/delay.h>
 #include <linux/of_device.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -43,6 +44,7 @@
 struct vita_uart_port {
 	struct uart_port port;
 	struct delayed_work rx_poll_work;
+	bool tx_dead;	/* a transmit wait timed out: the port is given up on */
 };
 
 static inline struct vita_uart_port *to_vita_port(struct uart_port *port)
@@ -74,6 +76,26 @@ static bool vita_uart_dev_ready(struct uart_port *port)
 	return !!(vita_uart_read32(port, VITA_UART_STATUS) & VITA_UART_STATUS_DEVREADY);
 }
 
+/*
+ * Transmit waits are bounded (a character takes 87 us at 115200): a port
+ * that never becomes ready, such as a DevKit UART1 the CP board does not
+ * clock, is given up on instead of stopping every printk and console write.
+ */
+#define VITA_UART_TX_WAIT_US	2000
+
+static bool vita_uart_tx_wait(struct uart_port *port, bool (*ready)(struct uart_port *))
+{
+	unsigned int us;
+
+	for (us = 0; us < VITA_UART_TX_WAIT_US; us++) {
+		if (ready(port))
+			return true;
+		udelay(1);
+	}
+	to_vita_port(port)->tx_dead = true;
+	return false;
+}
+
 static u32 vita_uart_read_cnt(struct uart_port *port)
 {
 	return vita_uart_read32(port, VITA_UART_READ_CNT) & VITA_UART_READ_CNT_MASK;
@@ -103,18 +125,18 @@ static void vita_uart_tx_chars(struct uart_port *port)
 	unsigned char ch;
 
 	if (port->x_char) {
-		while (!vita_uart_tx_ready(port))
-			cpu_relax();
-		vita_uart_write32(port, port->x_char, VITA_UART_WRITE_FIFO);
+		if (!to_vita_port(port)->tx_dead &&
+		    vita_uart_tx_wait(port, vita_uart_tx_ready))
+			vita_uart_write32(port, port->x_char, VITA_UART_WRITE_FIFO);
 		port->x_char = 0;
 		port->icount.tx++;
 	}
 
 	/* No TX interrupt is wired up: drain the kfifo by polling TXREADY */
 	while (!uart_tx_stopped(port) && uart_fifo_get(port, &ch)) {
-		while (!vita_uart_tx_ready(port))
-			cpu_relax();
-		vita_uart_write32(port, ch, VITA_UART_WRITE_FIFO);
+		if (!to_vita_port(port)->tx_dead &&
+		    vita_uart_tx_wait(port, vita_uart_tx_ready))
+			vita_uart_write32(port, ch, VITA_UART_WRITE_FIFO);
 	}
 
 	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
@@ -218,13 +240,13 @@ static struct vita_uart_port vita_uart_ports[VITA_UART_MAX_PORTS];
 #ifdef CONFIG_SERIAL_VITA_UART_CONSOLE
 static void vita_uart_console_putchar(struct uart_port *port, unsigned char chr)
 {
-	while (!vita_uart_tx_ready(port))
-		cpu_relax();
+	if (to_vita_port(port)->tx_dead ||
+	    !vita_uart_tx_wait(port, vita_uart_tx_ready))
+		return;
 
 	vita_uart_write32(port, chr, VITA_UART_WRITE_FIFO);
 
-	while (!vita_uart_dev_ready(port))
-		cpu_relax();
+	vita_uart_tx_wait(port, vita_uart_dev_ready);
 }
 
 static void vita_uart_console_write(struct console *co, const char *s, unsigned int cnt)
@@ -246,6 +268,12 @@ static int vita_uart_console_setup(struct console *co, char *options)
 		return -ENODEV;
 
 	vita_port = &vita_uart_ports[co->index];
+	/*
+	 * console=ttyS1 is tried as soon as ttyS0 registers the console, before
+	 * port 1 has probed; it is set up again when it does.
+	 */
+	if (!vita_port->port.membase)
+		return -ENODEV;
 
 	if (options)
 		uart_parse_options(options, &baud, &parity, &bits, &flow);
