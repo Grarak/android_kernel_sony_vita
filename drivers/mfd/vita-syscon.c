@@ -205,6 +205,9 @@ static int vita_syscon_probe(struct spi_device *spi)
 	if (irq <= 0)
 		return irq ? irq : -ENODEV;
 
+	/* Before the IRQ: an edge latched while the loader ran fires at once. */
+	init_completion(&syscon->rx_irq);
+
 	ret = devm_request_irq(&spi->dev, irq, vita_syscon_rx_gpio_irq_handler, 0,
 			       "vita-syscon-gpio-rx", syscon);
 	if (ret) {
@@ -215,8 +218,6 @@ static int vita_syscon_probe(struct spi_device *spi)
 	syscon->tx_gpio = devm_gpiod_get(&spi->dev, "tx", GPIOD_OUT_LOW);
 	if (IS_ERR(syscon->tx_gpio))
 		return PTR_ERR(syscon->tx_gpio);
-
-	init_completion(&syscon->rx_irq);
 
 	spi_set_drvdata(spi, syscon);
 	syscon->dev = &spi->dev;
