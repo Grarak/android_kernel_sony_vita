@@ -1093,6 +1093,24 @@ static irqreturn_t vita_udc_dma_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * The core only records a connect asked for while no gadget driver is bound,
+ * and a recorded connect makes the one at bind a no-op
+ * (usb_gadget_connect_locked), so the pullup would never happen. VBUS is
+ * therefore reported only to a bound driver; the core assumes it present.
+ */
+static void vita_udc_report_vbus(struct vita_udc *udc)
+{
+	unsigned long flags;
+	bool bound;
+
+	spin_lock_irqsave(&udc->lock, flags);
+	bound = udc->driver;
+	spin_unlock_irqrestore(&udc->lock, flags);
+	if (bound)
+		usb_udc_vbus_handler(&udc->gadget, udc->vbus);
+}
+
 static void vita_udc_vbus_changed(struct vita_udc *udc)
 {
 	bool vbus = vita_udc_vbus_present(udc);
@@ -1101,7 +1119,7 @@ static void vita_udc_vbus_changed(struct vita_udc *udc)
 		return;
 	udc->vbus = vbus;
 	dev_dbg(udc->dev, "VBUS %s\n", vbus ? "on" : "off");
-	usb_udc_vbus_handler(&udc->gadget, vbus);
+	vita_udc_report_vbus(udc);
 }
 
 /* VBUS insertion and removal latches, udcd 0x81006870. */
@@ -1405,6 +1423,8 @@ static int vita_udc_start(struct usb_gadget *gadget,
 	spin_lock_irqsave(&udc->lock, flags);
 	udc->driver = driver;
 	spin_unlock_irqrestore(&udc->lock, flags);
+	if (!udc->vbus)
+		usb_udc_vbus_handler(gadget, false);
 	return 0;
 }
 
@@ -1606,9 +1626,8 @@ static int vita_udc_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_req;
 
-	/* The gadget core assumes VBUS until told otherwise. */
+	/* The core assumes VBUS; vita_udc_start tells a bound driver otherwise. */
 	udc->vbus = vita_udc_vbus_present(udc);
-	usb_udc_vbus_handler(&udc->gadget, udc->vbus);
 	dev_info(dev, "bus %u, VBUS %s\n", udc->bus, udc->vbus ? "on" : "off");
 	return 0;
 
