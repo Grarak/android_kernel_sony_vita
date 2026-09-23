@@ -1432,6 +1432,29 @@ __hyp_reentry_vectors:
 #endif /* CONFIG_ARM_VIRT_EXT */
 
 __enter_kernel:
+#ifdef CONFIG_ARCH_VITA
+		/*
+		 * The Vita's PL310 L2 is enabled by the secure world and stays
+		 * on; cache_clean_flush only reaches L1.  The inflated kernel and
+		 * this code's page table would linger in L2 while the kernel's
+		 * head.S writes its page tables to memory with the MMU off, and
+		 * the first cached walks and loads would find stale lines.
+		 * Clean and invalidate every way (non-secure lines), then sync.
+		 */
+		movw	r3, #:lower16:0x1a002000
+		movt	r3, #:upper16:0x1a002000
+		movw	r5, #0xffff
+		str	r5, [r3, #0x7fc]	@ Clean and Invalidate by Way
+1:		ldr	r5, [r3, #0x7fc]
+		lsls	r5, r5, #16
+		bne	1b
+		mov	r5, #0
+		str	r5, [r3, #0x730]	@ Cache Sync
+1:		ldr	r5, [r3, #0x730]
+		tst	r5, #1
+		bne	1b
+		dsb
+#endif
 		mov	r0, #0			@ must be 0
 		mov	r1, r7			@ restore architecture number
 		mov	r2, r8			@ restore atags pointer
