@@ -419,6 +419,19 @@ config USB_ASPEED_UDC
 
 source "drivers/usb/gadget/udc/aspeed-vhub/Kconfig"
 
+config USB_VITA_UDC
+	tristate "PlayStation Vita USB device controller"
+	depends on ARCH_VITA || COMPILE_TEST
+	depends on HAS_DMA
+	help
+	  The Toshiba UDC2 device controllers of the PlayStation Vita's
+	  Kermit SoC: the multi-connector port (bus 2) and the DevKit's
+	  mini-USB debug port (bus 1). Gadget functions such as adb and MTP
+	  over FunctionFS run on it.
+
+	  Say "y" to link the driver statically, or "m" to build a
+	  dynamically linked module called "vita_udc".
+
 source "drivers/usb/gadget/udc/cdns2/Kconfig"
 
 #

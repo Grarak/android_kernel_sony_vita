@@ -35,3 +35,8 @@
 		};
 	};
 };
+
+/* udcd leaves bus 2 alone on the PlayStation TV (udcd.skprx 0x810082a0). */
+&udc2 {
+	status = "disabled";
+};

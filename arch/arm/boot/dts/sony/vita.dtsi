@@ -363,6 +363,30 @@
 		};
 
 		/*
+		 * USB device controller of the multi-connector (micro-USB on the
+		 * PCH-2000), udcd's bus 2: Toshiba UDC2 core at +0x200, Kermit DMA
+		 * blocks at +0x400 [RE udcd.skprx 3.65]. Its PHY mode, power,
+		 * reset and gate words are in Pervasive; PHY ready and VBUS in
+		 * Pervasive2. IDs 155/156 controller/DMA, 171 VBUS
+		 * [udcd.skprx 0x810082a0]. VBUS comes from Pervasive2 +0xF50 bit 2,
+		 * on the PCH-1000 together with GPIO0 port 5 (vita1000.dts).
+		 */
+		udc2: usb@e40d0000 {
+			compatible = "vita,udc";
+			reg = <0xe40d0000 0x1000>,
+			      <0xe3100000 0x1000>,
+			      <0xe3101000 0x1000>,
+			      <0xe3102000 0x1000>,
+			      <0xe3110000 0x1000>;
+			reg-names = "udc", "misc", "reset", "gate", "pervasive2";
+			interrupts = <GIC_SPI 123 IRQ_TYPE_LEVEL_HIGH>,	/* ID 155 */
+				     <GIC_SPI 124 IRQ_TYPE_LEVEL_HIGH>,	/* ID 156 */
+				     <GIC_SPI 139 IRQ_TYPE_LEVEL_HIGH>;	/* ID 171 */
+			interrupt-names = "udc", "dma", "vbus";
+			vita,usb-bus = <2>;
+		};
+
+		/*
 		 * PowerVR SGX543MP4+: CORE_ID 0x01174403, CORE_REVISION 0x00020106
 		 * [HW]. Power-up needs SMC 0x110 and the
 		 * SGXStart sequence before any register access; SceGpuLisr is ID 52
