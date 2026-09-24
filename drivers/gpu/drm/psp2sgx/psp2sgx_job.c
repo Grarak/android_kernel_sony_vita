@@ -231,6 +231,18 @@ static int build_code(struct psp2sgx_job *job, const struct drm_psp2sgx_submit *
 	if (!job->code)
 		return -ENOMEM;
 	sgx_mk_job_begin(&j, job->code, SGX_MK_JOB_CODE_MAX);
+	/*
+	 * What Sony's microkernel writes before every TA and 3D kick (a
+	 * register trace of the shell): the USSE clocks forced on, and the
+	 * data master partitions, 3 vertex and 8 pixel.  The init value
+	 * 0x208200 allows none: on the DevKit the vertex tasks of a TA were
+	 * never served (USEn_SERV_VERTEX 0), core 0 took one VDM batch, cores 1
+	 * to 3 none, and TA_FINISHED never came (register dump, 2026-09-24).
+	 * The clocks go back to automatic gating when the job ends, as Sony's
+	 * do; a job that gives up early leaves them on.
+	 */
+	sgx_mk_job_write(&j, SGX_CLKGATECTL2, SGX_CLKGATECTL2_USE_ON);
+	sgx_mk_job_write(&j, SGX_DMS_CTRL, SGX_DMS_CTRL_JOB);
 
 	switch (args->type) {
 	case PSP2SGX_JOB_RENDER:
@@ -254,8 +266,10 @@ static int build_code(struct psp2sgx_job *job, const struct drm_psp2sgx_submit *
 		return -EINVAL;
 	}
 	kfree(buf);
-	if (!err)
+	if (!err) {
+		sgx_mk_job_write(&j, SGX_CLKGATECTL2, SGX_CLKGATECTL2_AUTO);
 		err = sgx_mk_job_end(&j);
+	}
 	job->code_len = j.a.len;
 	return err;
 }
