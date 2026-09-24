@@ -30,6 +30,7 @@ struct psp2sgx_job {
 	struct psp2sgx_device *sgx;
 	struct psp2sgx_vm *vm;
 	struct drm_gem_object **bos;
+	u32 *bo_va;			/* where each of bos sits in vm */
 	u32 nr_bos;
 	u64 *code;
 	u32 code_len;
@@ -362,6 +363,41 @@ static struct dma_fence *psp2sgx_run_job(struct drm_sched_job *sched_job)
 }
 
 /* The SW_EVENT interrupt, from the threaded handler. */
+/*
+ * Which of the job's buffers holds each core's MMU fault address.  On the
+ * DevKit cores 2 and 3 faulted at 0x01010000 while its PTE was valid.
+ */
+static void report_fault_bos(struct psp2sgx_device *sgx, struct psp2sgx_job *job)
+{
+	unsigned int n;
+	u32 i;
+
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++) {
+		u32 stat = sgx_read(sgx, SGX_CORE_BANK(n) + SGX_BIF_INT_STAT);
+		u32 addr = sgx_read(sgx, SGX_CORE_BANK(n) + SGX_BIF_FAULT) & 0xfffff000;
+		bool found = false;
+
+		if (!(stat & 0x3fff))
+			continue;
+		for (i = 0; i < job->nr_bos && job->bos[i]; i++) {
+			size_t size = job->bos[i]->size;
+
+			if (addr >= job->bo_va[i] && addr - job->bo_va[i] < size) {
+				dev_warn(sgx->dev, "job %u: core %u fault %08x is in its buffer %u of %u (%08x, %zu bytes)\n",
+					 job->seqno, n, addr, i, job->nr_bos, job->bo_va[i], size);
+				found = true;
+			}
+		}
+		if (found)
+			continue;
+		dev_warn(sgx->dev, "job %u: core %u fault %08x is in none of its %u buffers:\n",
+			 job->seqno, n, addr, job->nr_bos);
+		for (i = 0; i < job->nr_bos && job->bos[i] && i < 48; i++)
+			dev_warn(sgx->dev, "job %u:   buffer %u at %08x, %zu bytes\n",
+				 job->seqno, i, job->bo_va[i], job->bos[i]->size);
+	}
+}
+
 void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 {
 	u32 *hc = psp2sgx_hostctl(sgx);
@@ -385,6 +421,8 @@ void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 					     job->seqno, error);
 			dma_fence_set_error(job->done, -EIO);
 			dump = !sgx->regs_dumped;
+			if (dump)
+				report_fault_bos(sgx, job);
 		}
 		/* which banks latch the TA and 3D events is open on the hardware */
 		if (error || (!sgx->events_reported &&
@@ -460,6 +498,7 @@ static void psp2sgx_job_put_bos(struct psp2sgx_job *job)
 		drm_gem_object_put(job->bos[i]);
 	}
 	kvfree(job->bos);
+	kvfree(job->bo_va);
 }
 
 static void psp2sgx_job_free(struct psp2sgx_job *job)
@@ -526,7 +565,8 @@ static int lookup_bos(struct drm_file *file, struct psp2sgx_job *job,
 	if (IS_ERR(sbos))
 		return PTR_ERR(sbos);
 	job->bos = kvcalloc(args->nr_bos, sizeof(*job->bos), GFP_KERNEL);
-	if (!job->bos) {
+	job->bo_va = kvcalloc(args->nr_bos, sizeof(*job->bo_va), GFP_KERNEL);
+	if (!job->bos || !job->bo_va) {
 		kfree(sbos);
 		return -ENOMEM;
 	}
@@ -544,7 +584,7 @@ static int lookup_bos(struct drm_file *file, struct psp2sgx_job *job,
 			goto err;
 		}
 		/* keeps the mapping while the job runs, even if the handle goes */
-		err = psp2sgx_bo_map_get(to_psp2sgx_bo(obj), job->vm, NULL);
+		err = psp2sgx_bo_map_get(to_psp2sgx_bo(obj), job->vm, &job->bo_va[i]);
 		if (err) {
 			drm_gem_object_put(obj);
 			goto err;

@@ -162,6 +162,7 @@ int psp2sgx_vm_map_sgt(struct psp2sgx_vm *vm, u32 va, struct sg_table *sgt,
 void psp2sgx_vm_unmap(struct psp2sgx_vm *vm, u32 va, size_t size);
 /* The PTE at va, 0 when there is no page table (diagnostics) */
 u32 psp2sgx_vm_pte_read(struct psp2sgx_vm *vm, u32 va);
+bool psp2sgx_vm_node_at(struct psp2sgx_vm *vm, u32 va, u32 *start, u32 *size);
 
 /* psp2sgx_job.c */
 int psp2sgx_sched_init(struct psp2sgx_device *sgx);

@@ -188,3 +188,22 @@ u32 psp2sgx_vm_pte_read(struct psp2sgx_vm *vm, u32 va)
 	mutex_unlock(&vm->lock);
 	return pte ? READ_ONCE(*pte) : 0;
 }
+
+/* The mapping holding va: its start and size, false when none (diagnostics) */
+bool psp2sgx_vm_node_at(struct psp2sgx_vm *vm, u32 va, u32 *start, u32 *size)
+{
+	struct drm_mm_node *node;
+	bool found = false;
+
+	mutex_lock(&vm->lock);
+	drm_mm_for_each_node(node, &vm->mm) {
+		if (va >= node->start && va - node->start < node->size) {
+			*start = node->start;
+			*size = node->size;
+			found = true;
+			break;
+		}
+	}
+	mutex_unlock(&vm->lock);
+	return found;
+}

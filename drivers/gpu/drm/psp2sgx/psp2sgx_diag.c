@@ -85,9 +85,14 @@ void psp2sgx_diag_dump(struct psp2sgx_device *sgx, const char *why)
 	for (n = 0; n < PSP2SGX_NUM_CORES; n++) {
 		u32 fault = sgx_read(sgx, SGX_CORE_BANK(n) + SGX_BIF_FAULT) & 0xfffff000;
 
-		if ((sgx_read(sgx, SGX_CORE_BANK(n) + SGX_BIF_INT_STAT) & 0x3fff) && sgx->current_vm)
-			dev_warn(sgx->dev, "diag %s: core %u fault at %08x: PTE %08x in the current address space\n",
-				 why, n, fault, psp2sgx_vm_pte_read(sgx->current_vm, fault));
+		u32 start = 0, size = 0;
+
+		if (!(sgx_read(sgx, SGX_CORE_BANK(n) + SGX_BIF_INT_STAT) & 0x3fff) || !sgx->current_vm)
+			continue;
+		if (!psp2sgx_vm_node_at(sgx->current_vm, fault, &start, &size))
+			start = size = 0;
+		dev_warn(sgx->dev, "diag %s: core %u fault at %08x: PTE %08x, mapping %08x + %x in the current address space\n",
+			 why, n, fault, psp2sgx_vm_pte_read(sgx->current_vm, fault), start, size);
 	}
 	dev_warn(sgx->dev, "diag %s: code base 15 bank0 %08x core0 %08x; event program %08x/%08x info %08x, PDS enable %08x; kicker %08x; directories %08x %08x\n",
 		 why, sgx_read(sgx, SGX_USE_CODE_BASE(SGX_MK_CODE_BASE)),
