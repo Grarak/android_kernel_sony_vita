@@ -24,10 +24,12 @@
  * across the loader's standby).
  */
 #include <linux/delay.h>
+#include <linux/moduleparam.h>
 #include <linux/workqueue.h>
 
 #include "psp2sgx_drv.h"
 #include "psp2sgx_mk.h"
+#include "psp2sgx_regdump.h"
 
 /* core registers the bare-metal probe read */
 #define SGX_USE0_SERV_EVENT		0x0b10	/* USSE tasks started */
@@ -37,6 +39,10 @@
 #define SGX_MASTER_BIF_FAULT		0x4c08
 
 #define SELFTEST_WAIT_US		100000
+
+/* psp2sgx.regdump_at_probe=1: the full register dump after the self-test too */
+static bool regdump_at_probe;
+module_param(regdump_at_probe, bool, 0444);
 
 void psp2sgx_diag_dump(struct psp2sgx_device *sgx, const char *why)
 {
@@ -116,6 +122,10 @@ int psp2sgx_diag_selftest(struct psp2sgx_device *sgx)
 			 "DID NOT RUN within %u us (runs %u)", SELFTEST_WAIT_US, runs);
 	dev_warn(sgx->dev, "microkernel self-test: %s\n", sgx->selftest);
 	psp2sgx_diag_dump(sgx, "after self-test");
+	if (regdump_at_probe) {
+		psp2sgx_diag_regdump(sgx, "after self-test");
+		sgx->regs_dumped = false;	/* the first job error still gets one */
+	}
 	schedule_delayed_work(&sgx->diag_work, 90 * HZ);
 	return runs != before ? 0 : -EIO;
 }
@@ -140,4 +150,41 @@ void psp2sgx_diag_init(struct psp2sgx_device *sgx)
 void psp2sgx_diag_fini(struct psp2sgx_device *sgx)
 {
 	cancel_delayed_work_sync(&sgx->diag_work);
+}
+
+static void regdump_block(struct psp2sgx_device *sgx, const char *block, u32 base,
+			  const u16 *regs, unsigned int n)
+{
+	char line[8 * 14 + 1];
+	unsigned int i, len = 0;
+
+	for (i = 0; i < n; i++) {
+		len += scnprintf(line + len, sizeof(line) - len, " %04x=%08x",
+				 regs[i], sgx_read(sgx, base + regs[i]));
+		if (i % 8 == 7 || i == n - 1) {
+			dev_warn(sgx->dev, "regs %s:%s\n", block, line);
+			len = 0;
+		}
+	}
+}
+
+/*
+ * Every register of SceGpuEs4's own debug dump, once per boot, on the first
+ * job the microkernel gives up on: offset=value, 8 per line, the master
+ * block then each core's bank (offsets within the bank).
+ */
+void psp2sgx_diag_regdump(struct psp2sgx_device *sgx, const char *why)
+{
+	static const char *const core_name[] = { "core0", "core1", "core2", "core3" };
+	unsigned int n;
+
+	if (sgx->regs_dumped)
+		return;
+	sgx->regs_dumped = true;
+	dev_warn(sgx->dev, "register dump (%s): SceGpuEs4's SGXDumpDebugState list\n", why);
+	regdump_block(sgx, "master", 0, psp2sgx_dump_master, ARRAY_SIZE(psp2sgx_dump_master));
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++)
+		regdump_block(sgx, core_name[n], SGX_CORE_BANK(n), psp2sgx_dump_core,
+			      ARRAY_SIZE(psp2sgx_dump_core));
+	dev_warn(sgx->dev, "register dump end\n");
 }

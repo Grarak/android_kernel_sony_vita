@@ -312,6 +312,7 @@ void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 	struct psp2sgx_job *job;
 	unsigned long flags;
 	u32 done, error;
+	bool dump = false;
 
 	/* the microkernel's stores sit in the SLC until flushed */
 	if (psp2sgx_hw_slc_flush(sgx))
@@ -327,6 +328,7 @@ void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 			dev_warn_ratelimited(sgx->dev, "job %u: microkernel error %#x\n",
 					     job->seqno, error);
 			dma_fence_set_error(job->done, -EIO);
+			dump = !sgx->regs_dumped;
 		}
 		/* which banks latch the TA and 3D events is open on the hardware */
 		if (error || (!sgx->events_reported &&
@@ -343,6 +345,14 @@ void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 		dma_fence_signal_locked(job->done);
 	}
 	spin_unlock_irqrestore(&sgx->fence_lock, flags);
+
+	/* the GPU as the failed wait left it (a TA that never ends keeps going) */
+	if (dump) {
+		mutex_lock(&sgx->hw_lock);
+		psp2sgx_diag_dump(sgx, "microkernel error");
+		psp2sgx_diag_regdump(sgx, "microkernel error");
+		mutex_unlock(&sgx->hw_lock);
+	}
 }
 
 static enum drm_gpu_sched_stat psp2sgx_timedout_job(struct drm_sched_job *sched_job)

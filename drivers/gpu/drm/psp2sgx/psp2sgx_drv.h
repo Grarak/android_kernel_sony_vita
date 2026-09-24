@@ -73,6 +73,7 @@ struct psp2sgx_device {
 	struct psp2sgx_job *current_job;
 	bool events_reported;		/* the EVENT_STATUS views logged once */
 	unsigned int timeouts_dumped;	/* diag dumps of job timeouts so far */
+	bool regs_dumped;		/* the full register dump, once */
 	struct delayed_work diag_work;	/* the self-test result again, later */
 	char selftest[64];		/* the microkernel self-test's result */
 
@@ -143,6 +144,7 @@ void psp2sgx_diag_dump(struct psp2sgx_device *sgx, const char *why);
 int psp2sgx_diag_selftest(struct psp2sgx_device *sgx);
 void psp2sgx_diag_init(struct psp2sgx_device *sgx);
 void psp2sgx_diag_fini(struct psp2sgx_device *sgx);
+void psp2sgx_diag_regdump(struct psp2sgx_device *sgx, const char *why);
 
 /* psp2sgx_mmu.c */
 int psp2sgx_kregion_init(struct psp2sgx_device *sgx);
