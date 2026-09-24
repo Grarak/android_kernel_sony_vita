@@ -201,13 +201,27 @@ int psp2sgx_hw_invalidate_caches(struct psp2sgx_device *sgx)
 		sgx_write(sgx, SGX_CORE_BANK(n) + SGX_TCU_ICTRL, 1);
 		sgx_write(sgx, SGX_CORE_BANK(n) + SGX_USE_CACHE, 1);
 	}
+	/*
+	 * Both PDS data caches: 0 before a TA, 1 before a 3D pass, as Sony's
+	 * microkernel invalidates them (a: shell register trace, INV1 with
+	 * TSP_PARAMETER_CACHE and host clear 5 before every render).  Every
+	 * job's PDS programs and data sit at the same address (0xd0000000),
+	 * so a stale DSC1 line runs the last job's pixel programs, with its
+	 * surface addresses (c: on the DevKit, cores 2 and 3 faulting at
+	 * 0x01010000, a surface of the previous address space, while on the
+	 * pixel event program).
+	 */
+	sgx_write(sgx, SGX_TSP_PARAMETER_CACHE, 1);
 	sgx_write(sgx, SGX_PDS_INV0, 1);
+	sgx_write(sgx, SGX_PDS_INV1, 1);
 	sgx_write(sgx, SGX_PDS_INV_CSC, 1);
 	if (poll_bits(sgx, SGX_PDS_CACHE_STATUS,
-		      SGX_PDS_CACHE_CSC_INV | SGX_PDS_CACHE_DSC_INV0, NULL))
+		      SGX_PDS_CACHE_CSC_INV | SGX_PDS_CACHE_DSC_INV0 |
+		      SGX_PDS_CACHE_DSC_INV1, NULL))
 		err = -ETIMEDOUT;
 	sgx_write(sgx, SGX_PDS_CACHE_HOST_CLEAR,
-		  SGX_PDS_CACHE_CSC_INV | SGX_PDS_CACHE_DSC_INV0);
+		  SGX_PDS_CACHE_CSC_INV | SGX_PDS_CACHE_DSC_INV0 |
+		  SGX_PDS_CACHE_DSC_INV1);
 	return err;
 }
 
