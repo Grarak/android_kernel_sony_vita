@@ -33,6 +33,16 @@ static u32 psp2sgx_smc_bus(u32 service, u32 bus, u32 command)
 }
 
 /*
+ * How many of the four cores the master hands work to (MASTER_CORE.ENABLE
+ * is the count less one; Sony runs 4).  On the DevKit cores 2 and 3 fault
+ * at 0x01010000 in a TA or hang in the 3D pass while cores 0 and 1 finish,
+ * so this runs two.
+ */
+static unsigned int cores = 2;
+module_param(cores, uint, 0444);
+MODULE_PARM_DESC(cores, "SGX cores in use, 1-4 (default 2)");
+
+/*
  * SceGpuEs4's SGXStart after the power-up: master clocks and SLC set-up,
  * master soft reset with the BIF set up during it, core clock gating.  The
  * genuine resume writes exactly these before its first SGX read; any read
@@ -40,7 +50,7 @@ static u32 psp2sgx_smc_bus(u32 service, u32 bus, u32 command)
  */
 static void psp2sgx_start(struct psp2sgx_device *sgx)
 {
-	sgx_write(sgx, SGX_MASTER_CORE, 3);
+	sgx_write(sgx, SGX_MASTER_CORE, clamp(cores, 1u, 4u) - 1);
 	sgx_write(sgx, SGX_MASTER_CLKGATECTL2, 0x2a9);
 	sgx_write(sgx, SGX_MASTER_CLKGATECTL, 0xaa);
 	sgx_write(sgx, SGX_MASTER_SOFT_RESET, 0x7ff);
@@ -304,6 +314,14 @@ int psp2sgx_hw_init(struct psp2sgx_device *sgx)
 	sgx_write(sgx, SGX_CORE_BANK(0) + SGX_EVENT_OTHER_PDS_DATA, SGX_PDS_EVENT_UNITS);
 	sgx_write(sgx, SGX_CORE_BANK(0) + SGX_EVENT_OTHER_PDS_INFO, 0x12001);
 	sgx_write(sgx, SGX_CORE_BANK(0) + SGX_EVENT_PDS_ENABLE, 0x2200c000);
+	/*
+	 * Sony's microkernel start-up (shell register trace): TA_CLK_GATE
+	 * START_TO_END in every core, the TA clocked from start to end.
+	 */
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++)
+		sgx_write(sgx, SGX_CORE_BANK(n) + SGX_TA_CLK_GATE, 1);
+	dev_info(sgx->dev, "%u of %u cores in use (psp2sgx.cores)\n",
+		 clamp(cores, 1u, 4u), PSP2SGX_NUM_CORES);
 	sgx_write(sgx, 0x4a58, 0x804300f);
 	sgx_write(sgx, 0x4808, 4);
 	sgx_write(sgx, 0x4144, 0x103e8);

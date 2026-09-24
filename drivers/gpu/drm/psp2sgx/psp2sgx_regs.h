@@ -22,6 +22,7 @@
 #define SGX_CLKGATECTL2			0x0004
 #define SGX_CLKGATESTATUS		0x0008
 /* a core's tiling units: TE, VDM and TA clocks, off once its TA is done */
+#define SGX_TA_CLK_GATE			0x0310	/* bit 0: START_TO_END */
 #define SGX_CLKGATESTATUS_TA_UNITS	(BIT(3) | BIT(6) | BIT(20))
 #define SGX_CLKGATESTATUS_3D_UNITS	(BIT(1) | BIT(2) | BIT(7) | BIT(8))	/* ISP2 TSP PDS PBE */
 /* the pipeline: ISP2 TSP TE MTE DPM VDM PDS PBE IDXFIFO TA (sgx543defs.h);
