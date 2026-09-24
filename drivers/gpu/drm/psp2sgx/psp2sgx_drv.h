@@ -30,15 +30,19 @@
 #define PSP2SGX_CODE_FRAGMENT_BASE	0xe0800000u	/* USSE code base 1 */
 #define PSP2SGX_CODE_END		0xe1000000u
 
-#define PSP2SGX_JOB_TIMEOUT_MS		500
+#define PSP2SGX_JOB_TIMEOUT_MS		2000
 #define PSP2SGX_MAX_REG_OPS		1024
 /*
  * A job's register poll gives up after this many rounds and reports the
- * register.  2^20 rounds outlasted the 500 ms job timeout on the DevKit
- * (a round is over 0.5 us there), so a hung wait was cut off by the host's
- * reset instead, with no error recorded; 2^16 should end first.
+ * register.  A round takes about 0.84 us on the DevKit (2^16 rounds ended
+ * after about 55 ms), and 55 ms cut off real renders: once a
+ * full-screen wallpaper's 3D pass was still running on core 0 (cores 1-3
+ * had PIXELBE_END_RENDER) when its wait gave up.  0x50000 rounds are about
+ * 275 ms; a job's waits together should still end before the host's job
+ * timeout, so that a hang is reported with the register it hung on.  The
+ * count is a full 32-bit register (i32mad2 multiplies 32 x 16).
  */
-#define PSP2SGX_WAIT_MAX_POLLS		0x00010000u
+#define PSP2SGX_WAIT_MAX_POLLS		0x00050000u
 
 struct psp2sgx_vm;
 struct psp2sgx_job;
