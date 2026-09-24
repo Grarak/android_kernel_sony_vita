@@ -249,11 +249,49 @@ static void vita_uart_console_putchar(struct uart_port *port, unsigned char chr)
 	vita_uart_tx_wait(port, vita_uart_dev_ready);
 }
 
-static void vita_uart_console_write(struct console *co, const char *s, unsigned int cnt)
+/*
+ * An nbcon console: a printk kthread prints it, so a slow line only makes the
+ * console lag.  As a legacy console, whichever task called printk printed the
+ * whole backlog itself, a character at a time with interrupts off; on the DevKit,
+ * where the CP board relays UART1 at 115200, Android's boot log kept one CPU in
+ * that loop and the others waiting on it.
+ */
+static void vita_uart_device_lock(struct console *co, unsigned long *flags)
+{
+	__uart_port_lock_irqsave(&vita_uart_ports[co->index].port, flags);
+}
+
+static void vita_uart_device_unlock(struct console *co, unsigned long flags)
+{
+	__uart_port_unlock_irqrestore(&vita_uart_ports[co->index].port, flags);
+}
+
+static void vita_uart_console_write_atomic(struct console *co,
+					   struct nbcon_write_context *wctxt)
 {
 	struct uart_port *port = &vita_uart_ports[co->index].port;
 
-	uart_console_write(port, s, cnt, vita_uart_console_putchar);
+	if (!nbcon_enter_unsafe(wctxt))
+		return;
+	uart_console_write(port, wctxt->outbuf, wctxt->len, vita_uart_console_putchar);
+	nbcon_exit_unsafe(wctxt);
+}
+
+/* One character per unsafe section, so a higher priority printer can take over. */
+static void vita_uart_console_write_thread(struct console *co,
+					   struct nbcon_write_context *wctxt)
+{
+	struct uart_port *port = &vita_uart_ports[co->index].port;
+	int len = READ_ONCE(wctxt->len);
+	int i;
+
+	for (i = 0; i < len; i++) {
+		if (!nbcon_enter_unsafe(wctxt))
+			return;
+		uart_console_write(port, wctxt->outbuf + i, 1, vita_uart_console_putchar);
+		if (!nbcon_exit_unsafe(wctxt))
+			return;
+	}
 }
 
 static int vita_uart_console_setup(struct console *co, char *options)
@@ -286,9 +324,12 @@ static struct uart_driver vita_uart_driver;
 static struct console vita_uart_console = {
 	.name = SERIAL_NAME,
 	.device = uart_console_device,
-	.write = vita_uart_console_write,
+	.write_atomic = vita_uart_console_write_atomic,
+	.write_thread = vita_uart_console_write_thread,
+	.device_lock = vita_uart_device_lock,
+	.device_unlock = vita_uart_device_unlock,
 	.setup = vita_uart_console_setup,
-	.flags = CON_PRINTBUFFER,
+	.flags = CON_PRINTBUFFER | CON_NBCON,
 	.index = -1,
 	.data = &vita_uart_driver,
 };
