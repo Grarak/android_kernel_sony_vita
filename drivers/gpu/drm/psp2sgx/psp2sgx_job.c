@@ -199,7 +199,7 @@ static void wait_ta_idle(struct sgx_mk_job *j)
 {
 	unsigned int n;
 
-	for (n = 0; n < PSP2SGX_NUM_CORES; n++)
+	for (n = 0; n < psp2sgx_hw_cores(); n++)
 		sgx_mk_job_wait(j, SGX_CORE_BANK(n) + SGX_CLKGATESTATUS,
 				SGX_CLKGATESTATUS_TA_UNITS, 0, PSP2SGX_WAIT_MAX_POLLS);
 }
@@ -218,9 +218,31 @@ static void wait_3d_idle(struct sgx_mk_job *j)
 {
 	unsigned int n;
 
-	for (n = 0; n < PSP2SGX_NUM_CORES; n++)
+	for (n = 0; n < psp2sgx_hw_cores(); n++)
 		sgx_mk_job_wait(j, SGX_CORE_BANK(n) + SGX_CLKGATESTATUS,
 				SGX_CLKGATESTATUS_3D_UNITS, 0, PSP2SGX_WAIT_MAX_POLLS);
+}
+
+/*
+ * What Sony's microkernel does between a TA and the 3D pass that a render's
+ * operations cannot (a: shell register trace, every kick): once the TA is
+ * done, the VDM batch number loaded and set back to 0 in the master and
+ * bank 0 (on the DevKit cores 2 and 3 read VDM_BATCH_NUM_STATUS 0 and
+ * never got a batch); after the tail pointer cache flush, an ISP2 soft reset
+ * pulse in bank 0 before the 3D set-up.
+ */
+static void ta_done(struct sgx_mk_job *j)
+{
+	sgx_mk_job_write(j, SGX_MASTER_VDM_BATCH_NUM, 1);
+	sgx_mk_job_write(j, SGX_MASTER_VDM_BATCH_NUM, 0);
+	sgx_mk_job_write(j, SGX_VDM_BATCH_NUM, 1);
+	sgx_mk_job_write(j, SGX_VDM_BATCH_NUM, 0);
+}
+
+static void tpc_flushed(struct sgx_mk_job *j)
+{
+	sgx_mk_job_write(j, SGX_SOFT_RESET, SGX_SOFT_RESET_ISP2);
+	sgx_mk_job_write(j, SGX_SOFT_RESET, 0);
 }
 
 static int build_render(struct sgx_mk_job *j,
@@ -247,8 +269,13 @@ static int build_render(struct sgx_mk_job *j,
 			sgx_mk_job_wait(j, op->reg, op->mask, op->value & op->mask,
 					PSP2SGX_WAIT_MAX_POLLS);
 			if ((op->reg == SGX_EVENT_STATUS || op->reg == SGX_MASTER_EVENT_STATUS) &&
-			    op->mask & op->value & SGX_EVENT_TA_FINISHED)
+			    op->mask & op->value & SGX_EVENT_TA_FINISHED) {
 				wait_ta_idle(j);
+				ta_done(j);
+			}
+			if (op->reg == SGX_EVENT_STATUS &&
+			    op->mask & op->value & SGX_EVENT_TPC_FLUSH)
+				tpc_flushed(j);
 			if ((op->reg == SGX_EVENT_STATUS || op->reg == SGX_MASTER_EVENT_STATUS) &&
 			    op->mask & op->value & SGX_EVENT_PIXELBE_END_RENDER)
 				wait_3d_idle(j);
