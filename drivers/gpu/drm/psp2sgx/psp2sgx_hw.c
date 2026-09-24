@@ -34,13 +34,13 @@ static u32 psp2sgx_smc_bus(u32 service, u32 bus, u32 command)
 
 /*
  * How many of the four cores the master hands work to (MASTER_CORE.ENABLE
- * is the count less one; Sony runs 4).  On the DevKit cores 2 and 3 fault
- * at 0x01010000 in a TA or hang in the 3D pass while cores 0 and 1 finish,
- * so this runs two.
+ * is the count less one; Sony runs 4).  On the DevKit cores 2 and 3 faulted
+ * or hung, and with two cores core 1 faulted too, so the default is Sony's
+ * four with the Sony-parity TA/3D set-up.
  */
-static unsigned int cores = 2;
+static unsigned int cores = 4;
 module_param(cores, uint, 0444);
-MODULE_PARM_DESC(cores, "SGX cores in use, 1-4 (default 2)");
+MODULE_PARM_DESC(cores, "SGX cores in use, 1-4 (default 4)");
 
 unsigned int psp2sgx_hw_cores(void)
 {
