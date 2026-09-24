@@ -16,7 +16,9 @@
  *    the code base, event program and kicker settings as the GPU holds them.
  *
  * The host control block is read after an SLC flush: the microkernel's
- * stores sit in the system-level cache until then.  The self-test result
+ * stores sit in the system-level cache until then.  Everything is logged
+ * as a warning: Android lowers the console level to 4 during boot.  The
+ * self-test result
  * and a dump are printed again 90 s after probe, for a console attached
  * after the kernel started (the DevKit's mini-USB port must be unplugged
  * across the loader's standby).
@@ -44,14 +46,14 @@ void psp2sgx_diag_dump(struct psp2sgx_device *sgx, const char *why)
 	unsigned int n;
 
 	rmb();
-	dev_info(sgx->dev, "diag %s: kregion dma %pad, page directory %pad, SLC flush %s\n",
+	dev_warn(sgx->dev, "diag %s: kregion dma %pad, page directory %pad, SLC flush %s\n",
 		 why, &sgx->kregion_dma, &sgx->kernel_vm->pd_dma, flush ? "TIMED OUT" : "ok");
-	dev_info(sgx->dev, "diag %s: hostctl %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x\n",
+	dev_warn(sgx->dev, "diag %s: hostctl %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x\n",
 		 why, hc[SGX_HC_STATE], hc[SGX_HC_JOB_SEQNO], hc[SGX_HC_DONE_SEQNO],
 		 hc[SGX_HC_ERROR], hc[SGX_HC_RUNS], hc[SGX_HC_DIAG_TA], hc[SGX_HC_DIAG_TA + 1],
 		 hc[SGX_HC_DIAG_TA + 2], hc[SGX_HC_DIAG_EVENT], hc[SGX_HC_DIAG_EVENT + 1],
 		 hc[SGX_HC_DIAG_EVENT + 2]);
-	dev_info(sgx->dev, "diag %s: EVENT_STATUS bank0 %08x master %08x cores %08x %08x %08x %08x; STATUS2 bank0 %08x core0 %08x\n",
+	dev_warn(sgx->dev, "diag %s: EVENT_STATUS bank0 %08x master %08x cores %08x %08x %08x %08x; STATUS2 bank0 %08x core0 %08x\n",
 		 why, sgx_read(sgx, SGX_EVENT_STATUS), sgx_read(sgx, SGX_MASTER_EVENT_STATUS),
 		 sgx_read(sgx, SGX_CORE_BANK(0) + SGX_EVENT_STATUS),
 		 sgx_read(sgx, SGX_CORE_BANK(1) + SGX_EVENT_STATUS),
@@ -59,16 +61,16 @@ void psp2sgx_diag_dump(struct psp2sgx_device *sgx, const char *why)
 		 sgx_read(sgx, SGX_CORE_BANK(3) + SGX_EVENT_STATUS),
 		 sgx_read(sgx, SGX_EVENT_STATUS2), sgx_read(sgx, c0 + SGX_EVENT_STATUS2));
 	for (n = 0; n < 4; n++)
-		dev_info(sgx->dev, "diag %s: core %u USSE tasks %08x memory writes %08x event program %08x (%08x)\n",
+		dev_warn(sgx->dev, "diag %s: core %u USSE tasks %08x memory writes %08x event program %08x (%08x)\n",
 			 why, n, sgx_read(sgx, SGX_CORE_BANK(n) + SGX_USE0_SERV_EVENT),
 			 sgx_read(sgx, SGX_CORE_BANK(n) + SGX_EMU_MEM_WRITE),
 			 sgx_read(sgx, SGX_CORE_BANK(n) + SGX_PDS_EVDM_PC_BASE),
 			 sgx_read(sgx, SGX_CORE_BANK(n) + SGX_PDS_EVDM_PC_BASE) << 2);
-	dev_info(sgx->dev, "diag %s: BIF int/fault core0 %08x/%08x master %08x/%08x; SLC status %08x\n",
+	dev_warn(sgx->dev, "diag %s: BIF int/fault core0 %08x/%08x master %08x/%08x; SLC status %08x\n",
 		 why, sgx_read(sgx, c0 + SGX_BIF_INT_STAT), sgx_read(sgx, c0 + SGX_BIF_FAULT),
 		 sgx_read(sgx, SGX_MASTER_BIF_INT_STAT), sgx_read(sgx, SGX_MASTER_BIF_FAULT),
 		 sgx_read(sgx, SGX_MASTER_SLC_EVENT_STATUS));
-	dev_info(sgx->dev, "diag %s: code base 15 bank0 %08x core0 %08x; event program %08x/%08x info %08x, PDS enable %08x; kicker %08x; directories %08x %08x\n",
+	dev_warn(sgx->dev, "diag %s: code base 15 bank0 %08x core0 %08x; event program %08x/%08x info %08x, PDS enable %08x; kicker %08x; directories %08x %08x\n",
 		 why, sgx_read(sgx, SGX_USE_CODE_BASE(SGX_MK_CODE_BASE)),
 		 sgx_read(sgx, c0 + SGX_USE_CODE_BASE(SGX_MK_CODE_BASE)),
 		 sgx_read(sgx, c0 + SGX_EVENT_OTHER_PDS_EXEC),
@@ -112,7 +114,7 @@ int psp2sgx_diag_selftest(struct psp2sgx_device *sgx)
 	else
 		snprintf(sgx->selftest, sizeof(sgx->selftest),
 			 "DID NOT RUN within %u us (runs %u)", SELFTEST_WAIT_US, runs);
-	dev_info(sgx->dev, "microkernel self-test: %s\n", sgx->selftest);
+	dev_warn(sgx->dev, "microkernel self-test: %s\n", sgx->selftest);
 	psp2sgx_diag_dump(sgx, "after self-test");
 	schedule_delayed_work(&sgx->diag_work, 90 * HZ);
 	return runs != before ? 0 : -EIO;
@@ -123,7 +125,7 @@ static void psp2sgx_diag_later(struct work_struct *work)
 	struct psp2sgx_device *sgx = container_of(to_delayed_work(work),
 						  struct psp2sgx_device, diag_work);
 
-	dev_info(sgx->dev, "microkernel self-test at probe: %s\n", sgx->selftest);
+	dev_warn(sgx->dev, "microkernel self-test at probe: %s\n", sgx->selftest);
 	mutex_lock(&sgx->hw_lock);
 	psp2sgx_diag_dump(sgx, "at 90 s");
 	mutex_unlock(&sgx->hw_lock);
