@@ -65,6 +65,7 @@ struct psp2sgx_device {
 	spinlock_t fence_lock;
 	/* the job on the hardware, if any; protected by fence_lock */
 	struct psp2sgx_job *current_job;
+	bool events_reported;		/* the EVENT_STATUS views logged once */
 
 	struct mutex hw_lock;		/* register programming outside IRQs */
 };

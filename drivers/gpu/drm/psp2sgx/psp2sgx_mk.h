@@ -50,6 +50,12 @@ enum sgx_mk_hostctl {
 	SGX_HC_DONE_SEQNO,	/* microkernel: the last finished job */
 	SGX_HC_ERROR,		/* microkernel: 0, or SGX_MK_ERR_* | register */
 	SGX_HC_RUNS,		/* microkernel: runs that took the lock */
+	/*
+	 * microkernel: EVENT_STATUS in bank 0, the master and core 0 when the
+	 * last wait for TA_FINISHED, then for any other event, met or timed out
+	 */
+	SGX_HC_DIAG_TA,
+	SGX_HC_DIAG_EVENT = SGX_HC_DIAG_TA + 3,
 	SGX_HC_WORDS = 16,
 };
 
@@ -74,9 +80,12 @@ void sgx_mk_job_begin(struct sgx_mk_job *j, u64 *buf, u32 cap);
 /* SGX register `reg` (byte offset) = value */
 void sgx_mk_job_write(struct sgx_mk_job *j, u32 reg, u32 value);
 /*
- * Poll until (register & mask) == value, at most max_polls reads; on a
+ * Poll until (register & mask) == value, at most max_polls rounds; on a
  * timeout record SGX_MK_ERR_WAIT_TIMEOUT | reg and return to the
- * microkernel, skipping the rest of the job.
+ * microkernel, skipping the rest of the job.  A wait on EVENT_STATUS in
+ * bank 0 or the master is met by the bits in any of bank 0, the master and
+ * core 0, which of them latch the TA and 3D events on the hardware being
+ * open, and leaves the three in the host control block's DIAG words.
  */
 void sgx_mk_job_wait(struct sgx_mk_job *j, u32 reg, u32 mask, u32 value,
 		     u32 max_polls);

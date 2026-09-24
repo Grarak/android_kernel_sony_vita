@@ -253,6 +253,7 @@ static struct dma_fence *psp2sgx_run_job(struct drm_sched_job *sched_job)
 	u32 *hc = psp2sgx_hostctl(sgx);
 	struct dma_fence *fence;
 	unsigned long flags;
+	unsigned int i;
 
 	if (unlikely(sched_job->s_fence->finished.error))
 		return NULL;
@@ -275,6 +276,8 @@ static struct dma_fence *psp2sgx_run_job(struct drm_sched_job *sched_job)
 			 job->code_len);
 	WRITE_ONCE(hc[SGX_HC_JOB_SEQNO], job->seqno);
 	WRITE_ONCE(hc[SGX_HC_ERROR], 0);
+	for (i = SGX_HC_DIAG_TA; i < SGX_HC_DIAG_EVENT + 3; i++)
+		WRITE_ONCE(hc[i], 0);
 	wmb();
 	WRITE_ONCE(hc[SGX_HC_STATE], SGX_MK_PENDING);
 	psp2sgx_hw_set_vm(sgx, job->vm);
@@ -308,6 +311,17 @@ void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 			dev_warn_ratelimited(sgx->dev, "job %u: microkernel error %#x\n",
 					     job->seqno, error);
 			dma_fence_set_error(job->done, -EIO);
+		}
+		/* which banks latch the TA and 3D events is open on the hardware */
+		if (error || (!sgx->events_reported &&
+			      (hc[SGX_HC_DIAG_TA + 1] | hc[SGX_HC_DIAG_EVENT + 1] |
+			       hc[SGX_HC_DIAG_TA] | hc[SGX_HC_DIAG_EVENT]))) {
+			sgx->events_reported = true;
+			dev_info_ratelimited(sgx->dev,
+				"job %u EVENT_STATUS bank0/master/core0: TA wait %#x/%#x/%#x, other %#x/%#x/%#x\n",
+				job->seqno, hc[SGX_HC_DIAG_TA], hc[SGX_HC_DIAG_TA + 1],
+				hc[SGX_HC_DIAG_TA + 2], hc[SGX_HC_DIAG_EVENT],
+				hc[SGX_HC_DIAG_EVENT + 1], hc[SGX_HC_DIAG_EVENT + 2]);
 		}
 		sgx->current_job = NULL;
 		dma_fence_signal_locked(job->done);

@@ -18,6 +18,7 @@
  * temporaries (SGX_MK_TEMP_UNITS).
  */
 #include <linux/errno.h>
+#include <linux/kernel.h>
 #include <linux/types.h>
 
 #include "psp2sgx_mk.h"
@@ -114,13 +115,36 @@ void sgx_mk_job_write(struct sgx_mk_job *j, u32 reg, u32 value)
  * microkernel's return address throughout (job code makes no calls), so a
  * job ends early with a plain LAPC.
  */
-#define WAIT_TIMEOUT_TAIL	8	/* instructions after the "met" branch */
+#define WAIT_CHECK_LEN		5	/* instructions polling one register */
+#define WAIT_TIMEOUT_TAIL	8	/* after the last check, without the diagnostic */
+#define WAIT_DIAG_LEN		3	/* instructions storing one register */
+
+static const u32 event_views[] = {
+	SGX_EVENT_STATUS, SGX_MASTER_EVENT_STATUS, SGX_CORE_BANK(0) + SGX_EVENT_STATUS,
+};
+
+static void wait_diag(struct sgx_usse_asm *a, u32 slot, unsigned int n)
+{
+	unsigned int i;
+
+	for (i = 0; i < n; i++) {
+		sgx_usse_ldr(a, R(17), event_views[i], 0);
+		sgx_usse_wdf(a, 0);
+		sgx_usse_st(a, SGX_USSE_ALWAYS, HC, IMM(slot + i), R(17));
+	}
+}
 
 void sgx_mk_job_wait(struct sgx_mk_job *j, u32 reg, u32 mask, u32 value,
 		     u32 max_polls)
 {
 	struct sgx_usse_asm *a = &j->a;
-	u32 loop, met, tail;
+	bool event = reg == SGX_EVENT_STATUS || reg == SGX_MASTER_EVENT_STATUS;
+	unsigned int views = event ? ARRAY_SIZE(event_views) : 1;
+	unsigned int diag = event ? views : 0;
+	u32 slot = mask & SGX_EVENT_TA_FINISHED ? SGX_HC_DIAG_TA : SGX_HC_DIAG_EVENT;
+	u32 tail_len = WAIT_TIMEOUT_TAIL + diag * WAIT_DIAG_LEN;
+	u32 loop, tail, check;
+	unsigned int i;
 
 	if (!max_polls) {
 		a->err = -EINVAL;
@@ -131,13 +155,19 @@ void sgx_mk_job_wait(struct sgx_mk_job *j, u32 reg, u32 mask, u32 value,
 	sgx_usse_limm(a, SGX_USSE_ALWAYS, R(20), 0xffffffffu);
 	sgx_usse_limm(a, SGX_USSE_ALWAYS, R(21), max_polls);
 	loop = sgx_usse_here(a);
-	sgx_usse_ldr(a, R(17), reg, 0);
-	sgx_usse_wdf(a, 0);
-	sgx_usse_bitop(a, SGX_USSE_ALWAYS, SGX_USSE_AND, R(17), R(17), R(18), false);
-	sgx_usse_test(a, SGX_USSE_ALWAYS, 0, SGX_USSE_TST_XOR, SGX_USSE_ZERO,
-		      R(17), R(19));
-	met = sgx_usse_here(a) + 1 + WAIT_TIMEOUT_TAIL;
-	sgx_usse_ba_index(a, SGX_USSE_P0, met);
+	for (i = 0; i < views; i++) {
+		check = a->len;
+		sgx_usse_ldr(a, R(17), event ? event_views[i] : reg, 0);
+		sgx_usse_wdf(a, 0);
+		sgx_usse_bitop(a, SGX_USSE_ALWAYS, SGX_USSE_AND, R(17), R(17), R(18), false);
+		sgx_usse_test(a, SGX_USSE_ALWAYS, 0, SGX_USSE_TST_XOR, SGX_USSE_ZERO,
+			      R(17), R(19));
+		/* met: past the other checks and the timeout tail */
+		sgx_usse_ba_index(a, SGX_USSE_P0, sgx_usse_here(a) + 1 +
+				  (views - 1 - i) * WAIT_CHECK_LEN + tail_len);
+		if (!a->err && a->len - check != WAIT_CHECK_LEN)
+			a->err = -EINVAL;
+	}
 	tail = a->len;
 	/* r21 -= 1: src0 * lo16(#1) + 0xffffffff */
 	sgx_usse_imad2(a, SGX_USSE_ALWAYS, R(21), R(21), IMM(1), R(20));
@@ -147,11 +177,14 @@ void sgx_mk_job_wait(struct sgx_mk_job *j, u32 reg, u32 mask, u32 value,
 	/* timed out: record which register, back to the microkernel */
 	sgx_usse_limm(a, SGX_USSE_ALWAYS, R(16), SGX_MK_ERR_WAIT_TIMEOUT | reg);
 	sgx_usse_st(a, SGX_USSE_ALWAYS, HC, IMM(SGX_HC_ERROR), R(16));
+	wait_diag(a, slot, diag);
 	sgx_usse_idf(a, 0);
 	sgx_usse_wdf(a, 0);
 	sgx_usse_ret(a, SGX_USSE_ALWAYS);
-	if (!a->err && a->len - tail != WAIT_TIMEOUT_TAIL)
+	if (!a->err && a->len - tail != tail_len)
 		a->err = -EINVAL;	/* the tail and its length went out of step */
+	/* met */
+	wait_diag(a, slot, diag);
 }
 
 void sgx_mk_job_task(struct sgx_mk_job *j, u32 task_word, u32 pds_addr,
