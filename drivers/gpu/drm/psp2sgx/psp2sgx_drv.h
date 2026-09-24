@@ -48,6 +48,7 @@ struct psp2sgx_device {
 	struct device *dev;
 	void __iomem *regs;
 	int irq;
+	struct psp2sgx_vm *current_vm;	/* the GPU's page directory, referenced */
 
 	/* SMC service switching the GPU power domain, or -1 */
 	int power_smc;
@@ -159,6 +160,8 @@ static inline struct psp2sgx_vm *psp2sgx_vm_get(struct psp2sgx_vm *vm)
 int psp2sgx_vm_map_sgt(struct psp2sgx_vm *vm, u32 va, struct sg_table *sgt,
 		       size_t size, u32 flags);
 void psp2sgx_vm_unmap(struct psp2sgx_vm *vm, u32 va, size_t size);
+/* The PTE at va, 0 when there is no page table (diagnostics) */
+u32 psp2sgx_vm_pte_read(struct psp2sgx_vm *vm, u32 va);
 
 /* psp2sgx_job.c */
 int psp2sgx_sched_init(struct psp2sgx_device *sgx);

@@ -178,3 +178,13 @@ void psp2sgx_vm_unmap(struct psp2sgx_vm *vm, u32 va, size_t size)
 	}
 	wmb();
 }
+
+u32 psp2sgx_vm_pte_read(struct psp2sgx_vm *vm, u32 va)
+{
+	u32 *pte;
+
+	mutex_lock(&vm->lock);
+	pte = vm_pte(vm, va, false);
+	mutex_unlock(&vm->lock);
+	return pte ? READ_ONCE(*pte) : 0;
+}

@@ -72,10 +72,23 @@ void psp2sgx_diag_dump(struct psp2sgx_device *sgx, const char *why)
 			 sgx_read(sgx, SGX_CORE_BANK(n) + SGX_EMU_MEM_WRITE),
 			 sgx_read(sgx, SGX_CORE_BANK(n) + SGX_PDS_EVDM_PC_BASE),
 			 sgx_read(sgx, SGX_CORE_BANK(n) + SGX_PDS_EVDM_PC_BASE) << 2);
-	dev_warn(sgx->dev, "diag %s: BIF int/fault core0 %08x/%08x master %08x/%08x; SLC status %08x\n",
+	dev_warn(sgx->dev, "diag %s: BIF int/fault cores %08x/%08x %08x/%08x %08x/%08x %08x/%08x master %08x/%08x; SLC status %08x\n",
 		 why, sgx_read(sgx, c0 + SGX_BIF_INT_STAT), sgx_read(sgx, c0 + SGX_BIF_FAULT),
+		 sgx_read(sgx, SGX_CORE_BANK(1) + SGX_BIF_INT_STAT),
+		 sgx_read(sgx, SGX_CORE_BANK(1) + SGX_BIF_FAULT),
+		 sgx_read(sgx, SGX_CORE_BANK(2) + SGX_BIF_INT_STAT),
+		 sgx_read(sgx, SGX_CORE_BANK(2) + SGX_BIF_FAULT),
+		 sgx_read(sgx, SGX_CORE_BANK(3) + SGX_BIF_INT_STAT),
+		 sgx_read(sgx, SGX_CORE_BANK(3) + SGX_BIF_FAULT),
 		 sgx_read(sgx, SGX_MASTER_BIF_INT_STAT), sgx_read(sgx, SGX_MASTER_BIF_FAULT),
 		 sgx_read(sgx, SGX_MASTER_SLC_EVENT_STATUS));
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++) {
+		u32 fault = sgx_read(sgx, SGX_CORE_BANK(n) + SGX_BIF_FAULT) & 0xfffff000;
+
+		if ((sgx_read(sgx, SGX_CORE_BANK(n) + SGX_BIF_INT_STAT) & 0x3fff) && sgx->current_vm)
+			dev_warn(sgx->dev, "diag %s: core %u fault at %08x: PTE %08x in the current address space\n",
+				 why, n, fault, psp2sgx_vm_pte_read(sgx->current_vm, fault));
+	}
 	dev_warn(sgx->dev, "diag %s: code base 15 bank0 %08x core0 %08x; event program %08x/%08x info %08x, PDS enable %08x; kicker %08x; directories %08x %08x\n",
 		 why, sgx_read(sgx, SGX_USE_CODE_BASE(SGX_MK_CODE_BASE)),
 		 sgx_read(sgx, c0 + SGX_USE_CODE_BASE(SGX_MK_CODE_BASE)),

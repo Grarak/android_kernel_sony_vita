@@ -232,6 +232,8 @@ static int psp2sgx_probe(struct platform_device *pdev)
 
 err_sched:
 	psp2sgx_sched_fini(sgx);
+	psp2sgx_vm_put(sgx->current_vm);
+	sgx->current_vm = NULL;
 err_kregion:
 	psp2sgx_kregion_fini(sgx);
 err_power:
@@ -246,6 +248,8 @@ static void psp2sgx_remove(struct platform_device *pdev)
 	drm_dev_unregister(&sgx->drm);
 	psp2sgx_diag_fini(sgx);
 	psp2sgx_sched_fini(sgx);
+	psp2sgx_vm_put(sgx->current_vm);
+	sgx->current_vm = NULL;
 	psp2sgx_hw_power_off(sgx);
 	devm_free_irq(sgx->dev, sgx->irq, sgx);
 	psp2sgx_kregion_fini(sgx);

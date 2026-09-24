@@ -129,9 +129,17 @@ int psp2sgx_hw_invalidate_caches(struct psp2sgx_device *sgx)
 {
 	int err = 0;
 
+	unsigned int n;
+
 	sgx_write(sgx, SGX_DCU_ICTRL, 1);
 	sgx_write(sgx, SGX_TCU_ICTRL, 1);
 	sgx_write(sgx, SGX_USE_CACHE, 1);
+	/* the other cores' data, texture and USSE code caches as well */
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++) {
+		sgx_write(sgx, SGX_CORE_BANK(n) + SGX_DCU_ICTRL, 1);
+		sgx_write(sgx, SGX_CORE_BANK(n) + SGX_TCU_ICTRL, 1);
+		sgx_write(sgx, SGX_CORE_BANK(n) + SGX_USE_CACHE, 1);
+	}
 	sgx_write(sgx, SGX_PDS_INV0, 1);
 	sgx_write(sgx, SGX_PDS_INV_CSC, 1);
 	if (poll_bits(sgx, SGX_PDS_CACHE_STATUS,
@@ -145,10 +153,33 @@ int psp2sgx_hw_invalidate_caches(struct psp2sgx_device *sgx)
 /* Point every requestor at vm's page directory and drop the BIF's TLBs. */
 void psp2sgx_hw_set_vm(struct psp2sgx_device *sgx, struct psp2sgx_vm *vm)
 {
+	unsigned int n;
+
+	if (sgx->current_vm != vm) {
+		psp2sgx_vm_put(sgx->current_vm);
+		sgx->current_vm = psp2sgx_vm_get(vm);
+	}
 	sgx_write(sgx, SGX_BIF_DIR_LIST_BASE(0), vm->pd_dma);
 	sgx_write(sgx, SGX_BIF_DIR_LIST_BASE(7), vm->pd_dma);
 	/* as the microkernel invalidates (A 0x0c89: str [0xc34] = #8) */
 	sgx_write(sgx, SGX_BIF_CTRL_INVAL, SGX_BIF_CTRL_INVAL_ALL);
+	/*
+	 * Sony keeps one GPU address space, this driver switches per process.
+	 * On the DevKit the first job of a second process faulted on cores 2
+	 * and 3 only (BIF_FAULT 0x01010000, invalid page) while cores 0 and 1
+	 * ran it: the bank 0 write may not reach the other cores' TLBs.  Each
+	 * core and the master get the directory and the invalidate too.
+	 */
+	sgx_write(sgx, SGX_MASTER_BIF_CTRL + SGX_BIF_DIR_LIST_BASE(0) - 0x0c00, vm->pd_dma);
+	sgx_write(sgx, SGX_MASTER_BIF_CTRL + SGX_BIF_DIR_LIST_BASE(7) - 0x0c00, vm->pd_dma);
+	sgx_write(sgx, SGX_MASTER_BIF_CTRL + SGX_BIF_CTRL_INVAL - 0x0c00, SGX_BIF_CTRL_INVAL_ALL);
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++) {
+		u32 bank = SGX_CORE_BANK(n);
+
+		sgx_write(sgx, bank + SGX_BIF_DIR_LIST_BASE(0), vm->pd_dma);
+		sgx_write(sgx, bank + SGX_BIF_DIR_LIST_BASE(7), vm->pd_dma);
+		sgx_write(sgx, bank + SGX_BIF_CTRL_INVAL, SGX_BIF_CTRL_INVAL_ALL);
+	}
 	wmb();
 }
 
