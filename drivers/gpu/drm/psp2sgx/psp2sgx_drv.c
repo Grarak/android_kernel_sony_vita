@@ -175,6 +175,7 @@ static int psp2sgx_probe(struct platform_device *pdev)
 		return PTR_ERR(sgx);
 	sgx->dev = dev;
 	mutex_init(&sgx->hw_lock);
+	psp2sgx_diag_init(sgx);
 	platform_set_drvdata(pdev, sgx);
 
 	sgx->regs = devm_platform_ioremap_resource(pdev, 0);
@@ -221,6 +222,9 @@ static int psp2sgx_probe(struct platform_device *pdev)
 	if (err)
 		goto err_sched;
 
+	/* a failed self-test is logged; jobs will time out with a register dump */
+	psp2sgx_diag_selftest(sgx);
+
 	err = drm_dev_register(&sgx->drm, 0);
 	if (err)
 		goto err_sched;
@@ -240,6 +244,7 @@ static void psp2sgx_remove(struct platform_device *pdev)
 	struct psp2sgx_device *sgx = platform_get_drvdata(pdev);
 
 	drm_dev_unregister(&sgx->drm);
+	psp2sgx_diag_fini(sgx);
 	psp2sgx_sched_fini(sgx);
 	psp2sgx_hw_power_off(sgx);
 	devm_free_irq(sgx->dev, sgx->irq, sgx);

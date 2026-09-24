@@ -66,6 +66,9 @@ struct psp2sgx_device {
 	/* the job on the hardware, if any; protected by fence_lock */
 	struct psp2sgx_job *current_job;
 	bool events_reported;		/* the EVENT_STATUS views logged once */
+	unsigned int timeouts_dumped;	/* diag dumps of job timeouts so far */
+	struct delayed_work diag_work;	/* the self-test result again, later */
+	char selftest[64];		/* the microkernel self-test's result */
 
 	struct mutex hw_lock;		/* register programming outside IRQs */
 };
@@ -129,6 +132,11 @@ int psp2sgx_hw_invalidate_caches(struct psp2sgx_device *sgx);
 void psp2sgx_hw_set_vm(struct psp2sgx_device *sgx, struct psp2sgx_vm *vm);
 void psp2sgx_hw_kick(struct psp2sgx_device *sgx);
 int psp2sgx_hw_build_kregion(struct psp2sgx_device *sgx);
+
+void psp2sgx_diag_dump(struct psp2sgx_device *sgx, const char *why);
+int psp2sgx_diag_selftest(struct psp2sgx_device *sgx);
+void psp2sgx_diag_init(struct psp2sgx_device *sgx);
+void psp2sgx_diag_fini(struct psp2sgx_device *sgx);
 
 /* psp2sgx_mmu.c */
 int psp2sgx_kregion_init(struct psp2sgx_device *sgx);

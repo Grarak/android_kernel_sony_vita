@@ -344,6 +344,12 @@ static enum drm_gpu_sched_stat psp2sgx_timedout_job(struct drm_sched_job *sched_
 		job->seqno, READ_ONCE(hc[SGX_HC_STATE]), READ_ONCE(hc[SGX_HC_DONE_SEQNO]),
 		READ_ONCE(hc[SGX_HC_ERROR]), READ_ONCE(hc[SGX_HC_RUNS]),
 		sgx_read(sgx, SGX_EVENT_STATUS));
+	if (sgx->timeouts_dumped < 2) {
+		sgx->timeouts_dumped++;
+		mutex_lock(&sgx->hw_lock);
+		psp2sgx_diag_dump(sgx, "job timeout");
+		mutex_unlock(&sgx->hw_lock);
+	}
 
 	drm_sched_stop(&sgx->sched, sched_job);
 	drm_sched_increase_karma(sched_job);

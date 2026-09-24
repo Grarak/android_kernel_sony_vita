@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
 psp2sgx-y := \
+	psp2sgx_diag.o \
 	psp2sgx_drv.o \
 	psp2sgx_gem.o \
 	psp2sgx_hw.o \
