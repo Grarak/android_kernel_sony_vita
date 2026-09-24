@@ -40,6 +40,12 @@ static unsigned int sdhci_vita_get_max_clock(struct sdhci_host *host)
 static const struct sdhci_ops sdhci_vita_ops = {
 	.set_clock		= sdhci_set_clock,
 	.get_max_clock		= sdhci_vita_get_max_clock,
+	/*
+	 * The capabilities register gives no timeout clock (sdhci_setup_host
+	 * fails the host with -ENODEV then): count data timeouts in SD clock
+	 * base cycles, the base clock from the DT.
+	 */
+	.get_timeout_clock	= sdhci_vita_get_max_clock,
 	.set_bus_width		= sdhci_set_bus_width,
 	.reset			= sdhci_reset,
 	.set_uhs_signaling	= sdhci_set_uhs_signaling,
