@@ -302,6 +302,16 @@ static struct dma_fence *psp2sgx_run_job(struct drm_sched_job *sched_job)
 	sgx->current_job = job;
 	spin_unlock_irqrestore(&sgx->fence_lock, flags);
 
+	/*
+	 * Empty the SLC before touching the host control block.  The
+	 * microkernel runs on every event, also after the job's completion
+	 * interrupt, and its run count store leaves the block's line dirty in
+	 * the SLC with the old state.  A flush after the writes below wrote
+	 * that line back over them: on the DevKit job 2 read "idle, job 1"
+	 * and timed out (2026-09-24).
+	 */
+	if (psp2sgx_hw_slc_flush(sgx))
+		dev_warn_ratelimited(sgx->dev, "SLC flush timed out\n");
 	psp2sgx_put_code((u8 *)sgx->kregion + SGX_MK_JOB_CODE, job->code,
 			 job->code_len);
 	WRITE_ONCE(hc[SGX_HC_JOB_SEQNO], job->seqno);

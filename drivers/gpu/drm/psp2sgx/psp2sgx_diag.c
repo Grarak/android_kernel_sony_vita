@@ -97,6 +97,8 @@ int psp2sgx_diag_selftest(struct psp2sgx_device *sgx)
 	unsigned int us;
 
 	mutex_lock(&sgx->hw_lock);
+	/* empty the SLC first: a flush after the write could write an old line over it */
+	psp2sgx_hw_slc_flush(sgx);
 	WRITE_ONCE(hc[SGX_HC_STATE], SGX_MK_IDLE);
 	wmb();
 	psp2sgx_hw_slc_flush(sgx);
