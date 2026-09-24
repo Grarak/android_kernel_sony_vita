@@ -390,8 +390,25 @@ out:
 int psp2sgx_hw_reset(struct psp2sgx_device *sgx)
 {
 	u32 *hc = psp2sgx_hostctl(sgx);
+	unsigned int n;
 
+	/*
+	 * The master soft reset in psp2sgx_start() does not stop a core that
+	 * hung in a TA or 3D pass: on the DevKit every job after a
+	 * failed one failed too, with the cores' pixel units still clocked.
+	 * Each core's own units are held in reset over the start sequence.
+	 */
+	sgx_write(sgx, SGX_SOFT_RESET, SGX_SOFT_RESET_ALL);
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++)
+		sgx_write(sgx, SGX_CORE_BANK(n) + SGX_SOFT_RESET, SGX_SOFT_RESET_ALL);
+	wmb();
+	udelay(10);
 	psp2sgx_start(sgx);
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++)
+		sgx_write(sgx, SGX_CORE_BANK(n) + SGX_SOFT_RESET, 0);
+	sgx_write(sgx, SGX_SOFT_RESET, 0);
+	wmb();
+	udelay(10);
 	WRITE_ONCE(hc[SGX_HC_STATE], SGX_MK_IDLE);
 	wmb();
 	return psp2sgx_hw_init(sgx);

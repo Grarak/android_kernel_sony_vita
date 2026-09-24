@@ -75,6 +75,8 @@ struct psp2sgx_device {
 	bool events_reported;		/* the EVENT_STATUS views logged once */
 	unsigned int timeouts_dumped;	/* diag dumps of job timeouts so far */
 	bool regs_dumped;		/* the full register dump, once */
+	bool needs_reset;		/* a job failed: reset before the next one */
+	unsigned int resets;		/* GPU resets after failed jobs */
 	struct delayed_work diag_work;	/* the self-test result again, later */
 	char selftest[64];		/* the microkernel self-test's result */
 

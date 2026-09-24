@@ -375,6 +375,20 @@ static struct dma_fence *psp2sgx_run_job(struct drm_sched_job *sched_job)
 		return ERR_PTR(-ENOMEM);
 
 	mutex_lock(&sgx->hw_lock);
+	/*
+	 * A job the microkernel gave up on leaves the GPU in its state (a TA
+	 * that never ends keeps going); without a reset every later job
+	 * failed as well (on the DevKit).  Sony restarts the GPU the same
+	 * way (SGXStart) after a lockup.
+	 */
+	if (sgx->needs_reset) {
+		sgx->needs_reset = false;
+		sgx->resets++;
+		dev_warn(sgx->dev, "GPU reset %u after a failed job, before job %llu\n",
+			 sgx->resets, sgx->emit_seqno + 1);
+		if (psp2sgx_hw_reset(sgx))
+			dev_err(sgx->dev, "GPU reset failed\n");
+	}
 	spin_lock_irqsave(&sgx->fence_lock, flags);
 	dma_fence_init(fence, &psp2sgx_fence_ops, &sgx->fence_lock,
 		       sgx->fence_context, ++sgx->emit_seqno);
@@ -473,6 +487,7 @@ void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 			dump = !sgx->regs_dumped;
 			if (dump)
 				report_fault_bos(sgx, job);
+			sgx->needs_reset = true;
 		}
 		/* which banks latch the TA and 3D events is open on the hardware */
 		if (error || (!sgx->events_reported &&
