@@ -132,6 +132,23 @@ static const u32 status2_views[] = {
 	SGX_EVENT_STATUS2, SGX_CORE_BANK(0) + SGX_EVENT_STATUS2,
 };
 
+unsigned int sgx_mk_wait_yield;
+
+/* timed out: what cores 1 to 3 had, which the three views do not show */
+#define WAIT_CORES_DIAG		3
+#define WAIT_CORES_LEN		(WAIT_CORES_DIAG * WAIT_DIAG_LEN)
+
+static void wait_cores_diag(struct sgx_usse_asm *a)
+{
+	unsigned int i;
+
+	for (i = 0; i < WAIT_CORES_DIAG; i++) {
+		sgx_usse_ldr(a, R(17), SGX_CORE_BANK(i + 1) + SGX_EVENT_STATUS, 0);
+		sgx_usse_wdf(a, 0);
+		sgx_usse_st(a, SGX_USSE_ALWAYS, HC, IMM(SGX_HC_DIAG_CORES + i), R(17));
+	}
+}
+
 static void wait_diag(struct sgx_usse_asm *a, u32 slot, unsigned int n)
 {
 	unsigned int i;
@@ -152,8 +169,11 @@ void sgx_mk_job_wait(struct sgx_mk_job *j, u32 reg, u32 mask, u32 value,
 	unsigned int views = event ? ARRAY_SIZE(event_views) :
 			     reg == SGX_EVENT_STATUS2 ? ARRAY_SIZE(status2_views) : 1;
 	unsigned int diag = event ? views : 0;
-	u32 slot = mask & SGX_EVENT_TA_FINISHED ? SGX_HC_DIAG_TA : SGX_HC_DIAG_EVENT;
-	u32 tail_len = WAIT_TIMEOUT_TAIL + diag * WAIT_DIAG_LEN;
+	bool ta = mask & SGX_EVENT_TA_FINISHED;
+	u32 slot = ta ? SGX_HC_DIAG_TA : SGX_HC_DIAG_EVENT;
+	unsigned int yield = min(sgx_mk_wait_yield, 16u);
+	u32 tail_len = WAIT_TIMEOUT_TAIL + diag * WAIT_DIAG_LEN + 2 * yield +
+		       (event ? WAIT_CORES_LEN : 0);
 	u32 loop, tail, check;
 	unsigned int i;
 
@@ -180,6 +200,14 @@ void sgx_mk_job_wait(struct sgx_mk_job *j, u32 reg, u32 mask, u32 value,
 			a->err = -EINVAL;
 	}
 	tail = a->len;
+	/*
+	 * Not met: each read's data fence deschedules this thread, which
+	 * leaves core 0's pipe to the render's own threads meanwhile.
+	 */
+	for (i = 0; i < yield; i++) {
+		sgx_usse_ldr(a, R(17), SGX_EVENT_STATUS, 0);
+		sgx_usse_wdf(a, 0);
+	}
 	/* r21 -= 1: src0 * lo16(#1) + 0xffffffff */
 	sgx_usse_imad2(a, SGX_USSE_ALWAYS, R(21), R(21), IMM(1), R(20));
 	sgx_usse_test(a, SGX_USSE_ALWAYS, 1, SGX_USSE_TST_AND, SGX_USSE_ZERO,
@@ -189,13 +217,18 @@ void sgx_mk_job_wait(struct sgx_mk_job *j, u32 reg, u32 mask, u32 value,
 	sgx_usse_limm(a, SGX_USSE_ALWAYS, R(16), SGX_MK_ERR_WAIT_TIMEOUT | reg);
 	sgx_usse_st(a, SGX_USSE_ALWAYS, HC, IMM(SGX_HC_ERROR), R(16));
 	wait_diag(a, slot, diag);
+	if (event)
+		wait_cores_diag(a);
 	sgx_usse_idf(a, 0);
 	sgx_usse_wdf(a, 0);
 	sgx_usse_ret(a, SGX_USSE_ALWAYS);
 	if (!a->err && a->len - tail != tail_len)
 		a->err = -EINVAL;	/* the tail and its length went out of step */
-	/* met */
+	/* met: also the rounds left, from which the host counts those used */
 	wait_diag(a, slot, diag);
+	if (event)
+		sgx_usse_st(a, SGX_USSE_ALWAYS, HC,
+			    IMM(ta ? SGX_HC_POLLS_TA : SGX_HC_POLLS_EVENT), R(21));
 }
 
 void sgx_mk_job_task(struct sgx_mk_job *j, u32 task_word, u32 pds_addr,

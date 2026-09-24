@@ -81,6 +81,12 @@ struct psp2sgx_device {
 	bool regs_dumped;		/* the full register dump, once */
 	bool needs_reset;		/* a job failed: reset before the next one */
 	unsigned int resets;		/* GPU resets after failed jobs */
+	/* poll rounds the TA [0] and 3D [1] waits used, since the last report */
+	struct {
+		u32 jobs, max;
+		u64 sum;
+		u32 over[4];		/* above 1/64, 1/16, 1/4 and 1/2 of the budget */
+	} polls[2];
 	struct delayed_work diag_work;	/* the self-test result again, later */
 	char selftest[64];		/* the microkernel self-test's result */
 

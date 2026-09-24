@@ -25,6 +25,10 @@
 #include "psp2sgx_gem.h"
 #include "psp2sgx_mk.h"
 
+module_param_named(wait_yield, sgx_mk_wait_yield, uint, 0444);
+MODULE_PARM_DESC(wait_yield,
+		 "register reads per poll round of a job's waits, 0-16 (default 0)");
+
 struct psp2sgx_job {
 	struct drm_sched_job base;
 	struct psp2sgx_device *sgx;
@@ -412,7 +416,7 @@ static struct dma_fence *psp2sgx_run_job(struct drm_sched_job *sched_job)
 			 job->code_len);
 	WRITE_ONCE(hc[SGX_HC_JOB_SEQNO], job->seqno);
 	WRITE_ONCE(hc[SGX_HC_ERROR], 0);
-	for (i = SGX_HC_DIAG_TA; i < SGX_HC_DIAG_EVENT + 3; i++)
+	for (i = SGX_HC_DIAG_TA; i < SGX_HC_WORDS; i++)
 		WRITE_ONCE(hc[i], 0);
 	wmb();
 	WRITE_ONCE(hc[SGX_HC_STATE], SGX_MK_PENDING);
@@ -424,6 +428,47 @@ static struct dma_fence *psp2sgx_run_job(struct drm_sched_job *sched_job)
 	psp2sgx_hw_kick(sgx);
 	mutex_unlock(&sgx->hw_lock);
 	return fence;
+}
+
+/*
+ * How long the TA and 3D waits of finished jobs polled, against the budget:
+ * a render that is slow and one held back until its wait gives up look the
+ * same in a timeout alone.  Reported every 2000 jobs and with each failure.
+ */
+static void account_polls(struct psp2sgx_device *sgx, const u32 *hc)
+{
+	static const u32 shift[4] = { 6, 4, 2, 1 };
+	unsigned int k, i;
+
+	for (k = 0; k < 2; k++) {
+		u32 left = hc[k ? SGX_HC_POLLS_EVENT : SGX_HC_POLLS_TA], used;
+
+		if (!left || left > PSP2SGX_WAIT_MAX_POLLS)
+			continue;	/* no such wait, or it timed out */
+		used = PSP2SGX_WAIT_MAX_POLLS - left + 1;
+		sgx->polls[k].jobs++;
+		sgx->polls[k].sum += used;
+		sgx->polls[k].max = max(sgx->polls[k].max, used);
+		for (i = 0; i < 4; i++)
+			if (used > PSP2SGX_WAIT_MAX_POLLS >> shift[i])
+				sgx->polls[k].over[i]++;
+	}
+}
+
+static void report_polls(struct psp2sgx_device *sgx, const char *why)
+{
+	unsigned int k;
+
+	for (k = 0; k < 2; k++) {
+		typeof(sgx->polls[0]) *p = &sgx->polls[k];
+
+		dev_info(sgx->dev, "%s: %s waits %u, polls mean %llu max %u of %u, over 1/64 %u 1/16 %u 1/4 %u 1/2 %u\n",
+			 why, k ? "3D" : "TA", p->jobs,
+			 p->jobs ? div_u64(p->sum, p->jobs) : 0, p->max,
+			 PSP2SGX_WAIT_MAX_POLLS, p->over[0], p->over[1],
+			 p->over[2], p->over[3]);
+	}
+	memset(sgx->polls, 0, sizeof(sgx->polls));
 }
 
 /* The SW_EVENT interrupt, from the threaded handler. */
@@ -480,9 +525,13 @@ void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 	spin_lock_irqsave(&sgx->fence_lock, flags);
 	job = sgx->current_job;
 	if (job && (s32)(done - job->seqno) >= 0) {
+		account_polls(sgx, hc);
 		if (error) {
-			dev_warn_ratelimited(sgx->dev, "job %u: microkernel error %#x\n",
-					     job->seqno, error);
+			dev_warn_ratelimited(sgx->dev, "job %u: microkernel error %#x, cores 1-3 EVENT_STATUS %#x %#x %#x\n",
+					     job->seqno, error, hc[SGX_HC_DIAG_CORES],
+					     hc[SGX_HC_DIAG_CORES + 1],
+					     hc[SGX_HC_DIAG_CORES + 2]);
+			report_polls(sgx, "before the failure");
 			dma_fence_set_error(job->done, -EIO);
 			dump = !sgx->regs_dumped;
 			if (dump)
@@ -502,6 +551,8 @@ void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 		}
 		sgx->current_job = NULL;
 		dma_fence_signal_locked(job->done);
+		if (sgx->polls[1].jobs >= 2000)
+			report_polls(sgx, "wait statistics");
 	}
 	spin_unlock_irqrestore(&sgx->fence_lock, flags);
 

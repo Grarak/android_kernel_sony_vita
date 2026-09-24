@@ -56,6 +56,14 @@ enum sgx_mk_hostctl {
 	 */
 	SGX_HC_DIAG_TA,
 	SGX_HC_DIAG_EVENT = SGX_HC_DIAG_TA + 3,
+	/*
+	 * microkernel: the poll rounds the last TA and other event wait had
+	 * left, 0 after a timeout
+	 */
+	SGX_HC_POLLS_TA = SGX_HC_DIAG_EVENT + 3,
+	SGX_HC_POLLS_EVENT,
+	/* microkernel: EVENT_STATUS of cores 1 to 3 when an event wait timed out */
+	SGX_HC_DIAG_CORES,
 	SGX_HC_WORDS = 16,
 };
 
@@ -90,6 +98,12 @@ void sgx_mk_job_write(struct sgx_mk_job *j, u32 reg, u32 value);
  */
 void sgx_mk_job_wait(struct sgx_mk_job *j, u32 reg, u32 mask, u32 value,
 		     u32 max_polls);
+/*
+ * Extra register reads per poll round of every later wait: each read's
+ * data fence deschedules the microkernel's thread, which leaves core 0's
+ * pipe to the render's own threads (psp2sgx.wait_yield).
+ */
+extern unsigned int sgx_mk_wait_yield;
 /*
  * Emit a PDS task and wait for it to signal core 0's USE_GLOBCOM1 bit 0, as
  * Sony's microkernel does with its own tasks.
