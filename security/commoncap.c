@@ -121,11 +121,41 @@ static inline int cap_capable_helper(const struct cred *cred,
  * has_ns_capability_noaudit(), and has_capability_noaudit() return a
  * bool true (1) for this case.
  */
+#ifdef CONFIG_ANDROID_PARANOID_NETWORK
+/* Android's AID_NET_RAW and AID_NET_ADMIN (system/core android_filesystem_config.h) */
+#define AID_NET_RAW	3004
+#define AID_NET_ADMIN	3005
+
+static bool android_net_group(const struct cred *cred, int cap)
+{
+	kgid_t gid;
+
+	if (cap == CAP_NET_RAW)
+		gid = KGIDT_INIT(AID_NET_RAW);
+	else if (cap == CAP_NET_ADMIN)
+		gid = KGIDT_INIT(AID_NET_ADMIN);
+	else
+		return false;
+	return gid_eq(cred->egid, gid) || groups_search(cred->group_info, gid);
+}
+#endif
+
 int cap_capable(const struct cred *cred, struct user_namespace *target_ns,
 		int cap, unsigned int opts)
 {
 	const struct user_namespace *cred_ns = cred->user_ns;
 	int ret = cap_capable_helper(cred, target_ns, cred_ns, cap);
+
+#ifdef CONFIG_ANDROID_PARANOID_NETWORK
+	/*
+	 * Android before 9 runs wificond, wpa_supplicant's helpers and others
+	 * as ordinary users in the net_raw/net_admin groups and relies on the
+	 * kernel to grant the capability for the group (the Android common
+	 * kernel's "paranoid network").  Only in the initial namespace.
+	 */
+	if (ret && target_ns == &init_user_ns && android_net_group(cred, cap))
+		ret = 0;
+#endif
 
 	trace_cap_capable(cred, target_ns, cred_ns, cap, ret);
 	return ret;

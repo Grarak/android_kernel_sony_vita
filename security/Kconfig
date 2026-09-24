@@ -96,6 +96,15 @@ config SECURITYFS
 
 	  If you are unsure how to answer this question, answer N.
 
+config ANDROID_PARANOID_NETWORK
+	bool "Android: net_raw and net_admin groups grant their capability"
+	help
+	  Members of Android's AID_NET_RAW (3004) and AID_NET_ADMIN (3005)
+	  groups get CAP_NET_RAW and CAP_NET_ADMIN in the initial user
+	  namespace, as the Android common kernel grants them.  Android 8.1's
+	  wificond relies on it.  Only the capability half of the Android
+	  feature: socket creation is not restricted to AID_INET.
+
 config SECURITY_NETWORK
 	bool "Socket and Networking Security Hooks"
 	depends on SECURITY
