@@ -353,6 +353,7 @@ static struct dma_fence *psp2sgx_run_job(struct drm_sched_job *sched_job)
 		WRITE_ONCE(hc[i], 0);
 	wmb();
 	WRITE_ONCE(hc[SGX_HC_STATE], SGX_MK_PENDING);
+	psp2sgx_hw_wait_cores_idle(sgx, job->seqno);
 	psp2sgx_hw_set_vm(sgx, job->vm);
 	/* the GPU must see the code, the job and the tables, not stale lines */
 	if (psp2sgx_hw_slc_flush(sgx) || psp2sgx_hw_invalidate_caches(sgx))

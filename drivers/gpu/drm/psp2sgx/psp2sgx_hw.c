@@ -97,6 +97,52 @@ static int poll_bits(struct psp2sgx_device *sgx, u32 reg, u32 bits, u32 *seen)
 }
 
 /*
+ * Wait until no core's pipeline is clocked.  The master's end-of-job events
+ * can come before every core is done (DevKit, 2026-09-24: TA_FINISHED early,
+ * PIXELBE_END_RENDER only in core 0's bank), and job 3 then faulted on cores
+ * 2 and 3 at the first page of a render target whose PTE was valid, as if
+ * their accesses were still in flight when the next job switched the page
+ * directory and dropped the TLBs.  Each wait that was needed is logged
+ * (the first 16), with every core's clock status and reads in flight.
+ */
+int psp2sgx_hw_wait_cores_idle(struct psp2sgx_device *sgx, u32 seqno)
+{
+	static unsigned int reported;
+	u32 before[PSP2SGX_NUM_CORES], reqs[PSP2SGX_NUM_CORES];
+	bool busy = false;
+	unsigned int n;
+	int err = 0;
+	ktime_t t0 = ktime_get();
+
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++) {
+		before[n] = sgx_read(sgx, SGX_CORE_BANK(n) + SGX_CLKGATESTATUS);
+		reqs[n] = sgx_read(sgx, SGX_CORE_BANK(n) + SGX_BIF_MEM_REQ_STAT);
+		busy |= !!(before[n] & SGX_CLKGATESTATUS_PIPELINE);
+	}
+	if (!busy)
+		return 0;
+	for (n = 0; n < PSP2SGX_NUM_CORES && !err; n++) {
+		u32 v;
+
+		err = readl_poll_timeout(sgx->regs + SGX_CORE_BANK(n) + SGX_CLKGATESTATUS,
+					 v, !(v & SGX_CLKGATESTATUS_PIPELINE), 2, 100000);
+	}
+	if (reported < 16 || err) {
+		reported++;
+		dev_warn(sgx->dev, "job %u: cores busy before the switch: clocks %08x %08x %08x %08x, reads %02x %02x %02x %02x; %s after %lld us, now %08x %08x %08x %08x\n",
+			 seqno, before[0], before[1], before[2], before[3],
+			 reqs[0] & 0xff, reqs[1] & 0xff, reqs[2] & 0xff, reqs[3] & 0xff,
+			 err ? "still busy" : "idle",
+			 ktime_us_delta(ktime_get(), t0),
+			 sgx_read(sgx, SGX_CORE_BANK(0) + SGX_CLKGATESTATUS),
+			 sgx_read(sgx, SGX_CORE_BANK(1) + SGX_CLKGATESTATUS),
+			 sgx_read(sgx, SGX_CORE_BANK(2) + SGX_CLKGATESTATUS),
+			 sgx_read(sgx, SGX_CORE_BANK(3) + SGX_CLKGATESTATUS));
+	}
+	return err;
+}
+
+/*
  * Write the system-level cache back and drop its lines, as the microkernel
  * does before the host reads what the GPU wrote (program A 0x1071).  USSE
  * stores are invisible to the CPU without it, and a program's last store is

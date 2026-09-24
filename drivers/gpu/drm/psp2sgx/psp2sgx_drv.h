@@ -136,6 +136,7 @@ void psp2sgx_hw_power_off(struct psp2sgx_device *sgx);
 int psp2sgx_hw_init(struct psp2sgx_device *sgx);
 int psp2sgx_hw_reset(struct psp2sgx_device *sgx);
 int psp2sgx_hw_slc_flush(struct psp2sgx_device *sgx);
+int psp2sgx_hw_wait_cores_idle(struct psp2sgx_device *sgx, u32 seqno);
 int psp2sgx_hw_invalidate_caches(struct psp2sgx_device *sgx);
 void psp2sgx_hw_set_vm(struct psp2sgx_device *sgx, struct psp2sgx_vm *vm);
 void psp2sgx_hw_kick(struct psp2sgx_device *sgx);
