@@ -191,7 +191,9 @@ static void regdump_block(struct psp2sgx_device *sgx, const char *block, u32 bas
 /*
  * Every register of SceGpuEs4's own debug dump, once per boot, on the first
  * job the microkernel gives up on: offset=value, 8 per line, the master
- * block then each core's bank (offsets within the bank).
+ * block then each core's bank (offsets within the bank).  Only the cores in
+ * use: with two enabled, reading core 2's bank past 0x900 ended in an
+ * imprecise external abort and a panic on the DevKit.
  */
 void psp2sgx_diag_regdump(struct psp2sgx_device *sgx, const char *why)
 {
@@ -203,7 +205,7 @@ void psp2sgx_diag_regdump(struct psp2sgx_device *sgx, const char *why)
 	sgx->regs_dumped = true;
 	dev_warn(sgx->dev, "register dump (%s): SceGpuEs4's SGXDumpDebugState list\n", why);
 	regdump_block(sgx, "master", 0, psp2sgx_dump_master, ARRAY_SIZE(psp2sgx_dump_master));
-	for (n = 0; n < PSP2SGX_NUM_CORES; n++)
+	for (n = 0; n < psp2sgx_hw_cores(); n++)
 		regdump_block(sgx, core_name[n], SGX_CORE_BANK(n), psp2sgx_dump_core,
 			      ARRAY_SIZE(psp2sgx_dump_core));
 	dev_warn(sgx->dev, "register dump end\n");

@@ -42,6 +42,11 @@ static unsigned int cores = 2;
 module_param(cores, uint, 0444);
 MODULE_PARM_DESC(cores, "SGX cores in use, 1-4 (default 2)");
 
+unsigned int psp2sgx_hw_cores(void)
+{
+	return clamp(cores, 1u, 4u);
+}
+
 /*
  * SceGpuEs4's SGXStart after the power-up: master clocks and SLC set-up,
  * master soft reset with the BIF set up during it, core clock gating.  The
