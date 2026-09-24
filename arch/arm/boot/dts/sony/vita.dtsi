@@ -114,11 +114,18 @@
 	};
 
 	/*
-	 * System timer (SceSystimer, 0xE20B0000) source clocks [HW, timers.c]:
-	 * source 0 ~220.9 MHz, source 16 = 27 MHz (the display driver's
-	 * clock). No Linux driver uses them yet; the MPCore timers are enough.
-	 * TODO: a clocksource for the 1 MHz word/long-range timers.
+	 * System timer (SceSystimer, 0xE20B0000) source clocks: source 0
+	 * ~220.9 MHz and source 16 = 27 MHz (the display driver's clock)
+	 * [HW]; source 3 48 MHz, which the Vita OS divides by 48 for its 1 MHz
+	 * system time [RE SceSystimer].
 	 */
+	systimer_src3: systimer-src3 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <48000000>;
+		clock-output-names = "systimer-src3";
+	};
+
 	systimer_src0: systimer-src0 {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
@@ -175,9 +182,26 @@
 		 */
 		global_timer: timer@1a000200 {
 			compatible = "arm,cortex-a9-global-timer";
+			/*
+			 * Counts PERIPHCLK, which follows the ARM clock; its
+			 * prescaler cannot keep one rate across 333, 444 and
+			 * 500 MHz. The system timer below is the clocksource.
+			 */
+			status = "disabled";
 			reg = <0x1a000200 0x20>;
 			interrupts = <GIC_PPI 11 (GIC_CPU_MASK_SIMPLE(4) | IRQ_TYPE_EDGE_RISING)>;
 			clocks = <&periphclk>;
+		};
+
+		/*
+		 * Long-range system timer 0, free once the Vita OS is gone (units
+		 * 0-4 are SceSystimer's, 5 is the Vita OS system time) [RE
+		 * SceSystimer]: the clocksource, sched_clock and delay timer.
+		 */
+		systimer: timer@e20b1000 {
+			compatible = "sony,vita-systimer";
+			reg = <0xe20b1000 0x1000>;
+			clocks = <&systimer_src3>;
 		};
 
 		local_timer: timer@1a000600 {

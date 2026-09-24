@@ -782,6 +782,16 @@ config NXP_STM_TIMER
           Enables the support for NXP System Timer Module found in the
           s32g NXP platform series.
 
+config VITA_SYSTIMER
+	bool "PlayStation Vita system timer" if COMPILE_TEST
+	depends on ARM || COMPILE_TEST
+	select TIMER_OF
+	help
+	  Use one of the PlayStation Vita's long-range system timers, a 64-bit
+	  counter on a fixed 48 MHz clock, as the clocksource, sched_clock and
+	  delay timer. Unlike the Cortex-A9 global timer it keeps its rate when
+	  the ARM clock changes.
+
 config RTK_SYSTIMER
 	bool "Realtek SYSTIMER support"
 	depends on ARM || ARM64

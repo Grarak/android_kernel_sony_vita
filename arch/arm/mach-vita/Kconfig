@@ -7,6 +7,7 @@ config ARCH_VITA
 	select CACHE_L2X0
 	select HAVE_ARM_SCU if SMP
 	select HAVE_ARM_TWD if SMP
+	select VITA_SYSTIMER
 	select ARCH_HAS_RESET_CONTROLLER
 	select RESET_CONTROLLER
 	select PM_GENERIC_DOMAINS if PM
