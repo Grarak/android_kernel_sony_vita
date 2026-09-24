@@ -176,6 +176,33 @@ static void clear_cores(struct sgx_mk_job *j, u32 reg, u32 value)
 		sgx_mk_job_write(j, SGX_CORE_BANK(n) + reg, value);
 }
 
+/*
+ * TA_FINISHED in bank 0 and the master does not mean every core is done
+ * with the TA.  On the DevKit (2026-09-24) job 3's TA wait passed on the
+ * master's bit while core 0 did not have it yet; cores 0 and 1 set it only
+ * after the wait, and cores 2 and 3 never did: their TA, TE and VDM clocks
+ * were still running when the 3D pass started over them, and they hung
+ * there with every later job.  So a TA starts with the bit cleared in every
+ * view, whatever the previous job left, and its end also waits for each
+ * core's tiling units to go idle.  That holds for a core that got no batch
+ * too, which a wait for each core's own TA_FINISHED would not.
+ */
+static void clear_ta_finished(struct sgx_mk_job *j)
+{
+	sgx_mk_job_write(j, SGX_EVENT_HOST_CLEAR, SGX_EVENT_TA_FINISHED);
+	sgx_mk_job_write(j, SGX_MASTER_EVENT_HOST_CLEAR, SGX_EVENT_TA_FINISHED);
+	clear_cores(j, SGX_EVENT_HOST_CLEAR, SGX_EVENT_TA_FINISHED);
+}
+
+static void wait_ta_idle(struct sgx_mk_job *j)
+{
+	unsigned int n;
+
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++)
+		sgx_mk_job_wait(j, SGX_CORE_BANK(n) + SGX_CLKGATESTATUS,
+				SGX_CLKGATESTATUS_TA_UNITS, 0, PSP2SGX_WAIT_MAX_POLLS);
+}
+
 static int build_render(struct sgx_mk_job *j,
 			const struct drm_psp2sgx_reg_op *ops, u32 n)
 {
@@ -188,6 +215,8 @@ static int build_render(struct sgx_mk_job *j,
 		case PSP2SGX_REG_WRITE:
 			if (check_write(op->reg, op->value))
 				return -EPERM;
+			if (op->reg == SGX_VDM_START)
+				clear_ta_finished(j);
 			sgx_mk_job_write(j, op->reg, op->value);
 			if (op->reg == SGX_EVENT_HOST_CLEAR || op->reg == SGX_EVENT_HOST_CLEAR2)
 				clear_cores(j, op->reg, op->value);
@@ -197,6 +226,9 @@ static int build_render(struct sgx_mk_job *j,
 				return -EPERM;
 			sgx_mk_job_wait(j, op->reg, op->mask, op->value & op->mask,
 					PSP2SGX_WAIT_MAX_POLLS);
+			if ((op->reg == SGX_EVENT_STATUS || op->reg == SGX_MASTER_EVENT_STATUS) &&
+			    op->mask & op->value & SGX_EVENT_TA_FINISHED)
+				wait_ta_idle(j);
 			break;
 		default:
 			return -EINVAL;

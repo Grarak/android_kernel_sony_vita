@@ -20,6 +20,9 @@
 /* bank 0 */
 #define SGX_CLKGATECTL			0x0000
 #define SGX_CLKGATECTL2			0x0004
+#define SGX_CLKGATESTATUS		0x0008
+/* a core's tiling units: TE, VDM and TA clocks, off once its TA is done */
+#define SGX_CLKGATESTATUS_TA_UNITS	(BIT(3) | BIT(6) | BIT(20))
 #define  SGX_CLKGATECTL2_AUTO		0x0a8a8aaa	/* SGXStart's value */
 #define  SGX_CLKGATECTL2_USE_ON		0x0a8a4a6a	/* USE0/USE1 clocks on, Sony's during a job */
 #define SGX_CORE_ID			0x0020
