@@ -204,6 +204,25 @@ static void wait_ta_idle(struct sgx_mk_job *j)
 				SGX_CLKGATESTATUS_TA_UNITS, 0, PSP2SGX_WAIT_MAX_POLLS);
 }
 
+/*
+ * The same for the 3D pass: PIXELBE_END_RENDER is latched in core 0's bank
+ * and the master only, and it came while cores 2 and 3 were still shading
+ * (on the DevKit: before job 3 their ISP2, TSP, PDS and PBE clocks ran,
+ * CLKGATESTATUS 0x01008987, their pixel PDS stuck at the start of a
+ * program; cores 0 and 1 idle).  The job then ended over them: the USSE
+ * clocks back to automatic gating, the host's SLC flush and invalidate, the
+ * next job's directory switch, and they never finished.  So a render ends
+ * when every core's pixel units are idle.
+ */
+static void wait_3d_idle(struct sgx_mk_job *j)
+{
+	unsigned int n;
+
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++)
+		sgx_mk_job_wait(j, SGX_CORE_BANK(n) + SGX_CLKGATESTATUS,
+				SGX_CLKGATESTATUS_3D_UNITS, 0, PSP2SGX_WAIT_MAX_POLLS);
+}
+
 static int build_render(struct sgx_mk_job *j,
 			const struct drm_psp2sgx_reg_op *ops, u32 n)
 {
@@ -230,6 +249,9 @@ static int build_render(struct sgx_mk_job *j,
 			if ((op->reg == SGX_EVENT_STATUS || op->reg == SGX_MASTER_EVENT_STATUS) &&
 			    op->mask & op->value & SGX_EVENT_TA_FINISHED)
 				wait_ta_idle(j);
+			if ((op->reg == SGX_EVENT_STATUS || op->reg == SGX_MASTER_EVENT_STATUS) &&
+			    op->mask & op->value & SGX_EVENT_PIXELBE_END_RENDER)
+				wait_3d_idle(j);
 			break;
 		default:
 			return -EINVAL;
