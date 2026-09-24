@@ -161,7 +161,14 @@ void psp2sgx_hw_set_vm(struct psp2sgx_device *sgx, struct psp2sgx_vm *vm)
 	}
 	sgx_write(sgx, SGX_BIF_DIR_LIST_BASE(0), vm->pd_dma);
 	sgx_write(sgx, SGX_BIF_DIR_LIST_BASE(7), vm->pd_dma);
-	/* as the microkernel invalidates (A 0x0c89: str [0xc34] = #8) */
+	/*
+	 * as the microkernel invalidates (A 0x0c89: str [0xc34] = #8), from 0:
+	 * the register reads back 8 afterwards, so rewriting 8 may not start
+	 * another invalidate.  On the DevKit cores 2 and 3 faulted at a page
+	 * whose PTE was valid (BIF_FAULT 0x01010000, PTE 0x7a677001) after
+	 * the directory and 8 had been written to every bank.
+	 */
+	sgx_write(sgx, SGX_BIF_CTRL_INVAL, 0);
 	sgx_write(sgx, SGX_BIF_CTRL_INVAL, SGX_BIF_CTRL_INVAL_ALL);
 	/*
 	 * Sony keeps one GPU address space, this driver switches per process.
@@ -172,12 +179,14 @@ void psp2sgx_hw_set_vm(struct psp2sgx_device *sgx, struct psp2sgx_vm *vm)
 	 */
 	sgx_write(sgx, SGX_MASTER_BIF_CTRL + SGX_BIF_DIR_LIST_BASE(0) - 0x0c00, vm->pd_dma);
 	sgx_write(sgx, SGX_MASTER_BIF_CTRL + SGX_BIF_DIR_LIST_BASE(7) - 0x0c00, vm->pd_dma);
+	sgx_write(sgx, SGX_MASTER_BIF_CTRL + SGX_BIF_CTRL_INVAL - 0x0c00, 0);
 	sgx_write(sgx, SGX_MASTER_BIF_CTRL + SGX_BIF_CTRL_INVAL - 0x0c00, SGX_BIF_CTRL_INVAL_ALL);
 	for (n = 0; n < PSP2SGX_NUM_CORES; n++) {
 		u32 bank = SGX_CORE_BANK(n);
 
 		sgx_write(sgx, bank + SGX_BIF_DIR_LIST_BASE(0), vm->pd_dma);
 		sgx_write(sgx, bank + SGX_BIF_DIR_LIST_BASE(7), vm->pd_dma);
+		sgx_write(sgx, bank + SGX_BIF_CTRL_INVAL, 0);
 		sgx_write(sgx, bank + SGX_BIF_CTRL_INVAL, SGX_BIF_CTRL_INVAL_ALL);
 	}
 	wmb();
