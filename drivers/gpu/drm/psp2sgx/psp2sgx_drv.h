@@ -32,7 +32,13 @@
 
 #define PSP2SGX_JOB_TIMEOUT_MS		500
 #define PSP2SGX_MAX_REG_OPS		1024
-#define PSP2SGX_WAIT_MAX_POLLS		0x00100000u
+/*
+ * A job's register poll gives up after this many rounds and reports the
+ * register.  2^20 rounds outlasted the 500 ms job timeout on the DevKit
+ * (a round is over 0.5 us there), so a hung wait was cut off by the host's
+ * reset instead, with no error recorded; 2^16 should end first.
+ */
+#define PSP2SGX_WAIT_MAX_POLLS		0x00010000u
 
 struct psp2sgx_vm;
 struct psp2sgx_job;

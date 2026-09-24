@@ -85,7 +85,8 @@ void sgx_mk_job_write(struct sgx_mk_job *j, u32 reg, u32 value);
  * microkernel, skipping the rest of the job.  A wait on EVENT_STATUS in
  * bank 0 or the master is met by the bits in any of bank 0, the master and
  * core 0, which of them latch the TA and 3D events on the hardware being
- * open, and leaves the three in the host control block's DIAG words.
+ * open, and leaves the three in the host control block's DIAG words.  A wait
+ * on EVENT_STATUS2 in bank 0 is met by bank 0 or core 0.
  */
 void sgx_mk_job_wait(struct sgx_mk_job *j, u32 reg, u32 mask, u32 value,
 		     u32 max_polls);

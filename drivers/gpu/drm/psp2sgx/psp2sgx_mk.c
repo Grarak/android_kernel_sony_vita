@@ -123,6 +123,15 @@ static const u32 event_views[] = {
 	SGX_EVENT_STATUS, SGX_MASTER_EVENT_STATUS, SGX_CORE_BANK(0) + SGX_EVENT_STATUS,
 };
 
+/*
+ * On the DevKit TE_RGNHDR_INIT_COMPLETE (0x20) latched in core 0's
+ * EVENT_STATUS2 only: bank 0 read 0x90 and core 0 0xb0 while the wait in
+ * bank 0 went on (the psp2sgx diag of a job timeout, 2026-09-24).
+ */
+static const u32 status2_views[] = {
+	SGX_EVENT_STATUS2, SGX_CORE_BANK(0) + SGX_EVENT_STATUS2,
+};
+
 static void wait_diag(struct sgx_usse_asm *a, u32 slot, unsigned int n)
 {
 	unsigned int i;
@@ -139,7 +148,9 @@ void sgx_mk_job_wait(struct sgx_mk_job *j, u32 reg, u32 mask, u32 value,
 {
 	struct sgx_usse_asm *a = &j->a;
 	bool event = reg == SGX_EVENT_STATUS || reg == SGX_MASTER_EVENT_STATUS;
-	unsigned int views = event ? ARRAY_SIZE(event_views) : 1;
+	const u32 *view = event ? event_views : reg == SGX_EVENT_STATUS2 ? status2_views : &reg;
+	unsigned int views = event ? ARRAY_SIZE(event_views) :
+			     reg == SGX_EVENT_STATUS2 ? ARRAY_SIZE(status2_views) : 1;
 	unsigned int diag = event ? views : 0;
 	u32 slot = mask & SGX_EVENT_TA_FINISHED ? SGX_HC_DIAG_TA : SGX_HC_DIAG_EVENT;
 	u32 tail_len = WAIT_TIMEOUT_TAIL + diag * WAIT_DIAG_LEN;
@@ -157,7 +168,7 @@ void sgx_mk_job_wait(struct sgx_mk_job *j, u32 reg, u32 mask, u32 value,
 	loop = sgx_usse_here(a);
 	for (i = 0; i < views; i++) {
 		check = a->len;
-		sgx_usse_ldr(a, R(17), event ? event_views[i] : reg, 0);
+		sgx_usse_ldr(a, R(17), view[i], 0);
 		sgx_usse_wdf(a, 0);
 		sgx_usse_bitop(a, SGX_USSE_ALWAYS, SGX_USSE_AND, R(17), R(17), R(18), false);
 		sgx_usse_test(a, SGX_USSE_ALWAYS, 0, SGX_USSE_TST_XOR, SGX_USSE_ZERO,

@@ -162,6 +162,20 @@ static int check_write(u32 reg, u32 value)
 	return 0;
 }
 
+/*
+ * A bank 0 host clear does not reach the core banks: on the DevKit every
+ * core still held OTPM_INV and DPM_CONTROL_CLEAR (0x04100200) after the
+ * render cleared them in bank 0, and core 0 is one of the views a wait
+ * accepts (psp2sgx_mk.c), so a stale bit there would end the next wait early.
+ */
+static void clear_cores(struct sgx_mk_job *j, u32 reg, u32 value)
+{
+	unsigned int n;
+
+	for (n = 0; n < PSP2SGX_NUM_CORES; n++)
+		sgx_mk_job_write(j, SGX_CORE_BANK(n) + reg, value);
+}
+
 static int build_render(struct sgx_mk_job *j,
 			const struct drm_psp2sgx_reg_op *ops, u32 n)
 {
@@ -175,6 +189,8 @@ static int build_render(struct sgx_mk_job *j,
 			if (check_write(op->reg, op->value))
 				return -EPERM;
 			sgx_mk_job_write(j, op->reg, op->value);
+			if (op->reg == SGX_EVENT_HOST_CLEAR || op->reg == SGX_EVENT_HOST_CLEAR2)
+				clear_cores(j, op->reg, op->value);
 			break;
 		case PSP2SGX_REG_WAIT:
 			if (!reg_in(wait_ok, ARRAY_SIZE(wait_ok), op->reg))
