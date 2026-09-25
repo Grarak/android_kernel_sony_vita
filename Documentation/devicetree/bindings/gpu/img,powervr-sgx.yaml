@@ -26,6 +26,9 @@ properties:
               - ti,omap4430-gpu # Rev 120
           - const: img,powervr-sgx540
       - items:
+          - const: sony,vita-gpu # MP4+ Rev 1.0.6 (CORE_REVISION 0x20106)
+          - const: img,powervr-sgx543
+      - items:
           - enum:
               - allwinner,sun6i-a31-gpu # MP2 Rev 115
               - ti,omap4470-gpu # MP1 Rev 112
@@ -54,12 +57,40 @@ properties:
   power-domains:
     maxItems: 1
 
+  memory-region:
+    maxItems: 1
+    description:
+      Dedicated graphics memory the GPU allocates buffer objects from, such
+      as the PlayStation Vita's CDRAM. Buffer objects are in system memory
+      without it, or when it is full.
+
+  sony,power-smc:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    description:
+      The secure monitor call that switches the GPU's power domain on the
+      PlayStation Vita, which the non-secure world cannot do itself.
+    items:
+      - description: SMC service number
+      - description: bus argument of the call
+
 required:
   - compatible
   - reg
   - interrupts
 
 allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: sony,vita-gpu
+    then:
+      required:
+        - sony,power-smc
+    else:
+      properties:
+        memory-region: false
+        sony,power-smc: false
   - if:
       properties:
         compatible:
@@ -136,4 +167,16 @@ examples:
         interrupts = <GIC_SPI 97 IRQ_TYPE_LEVEL_HIGH>;
         clocks = <&ccu 1>, <&ccu 2>;
         clock-names = "core", "mem";
+    };
+
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    gpu@e8400000 {
+        compatible = "sony,vita-gpu", "img,powervr-sgx543";
+        reg = <0xe8400000 0x20000>;
+        interrupts = <GIC_SPI 20 IRQ_TYPE_LEVEL_HIGH>;
+        memory-region = <&cdram_gpu>;
+        sony,power-smc = <0x110 0>;
     };

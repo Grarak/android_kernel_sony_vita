@@ -192,6 +192,23 @@
 	/* The memory node is per model: 512 MiB retail, 1 GiB DevKit */
 
 	/*
+	 * CDRAM, the GPU's 128 MiB of wide-IO memory at 0x20000000-0x27FFFFFF
+	 * (non-secure, "VRAM. Graphics bar") [WIKI Physical_Memory], is not
+	 * system RAM. The boot loader enables it (SMC 0x117, smc_cdram_enable
+	 * [WIKI SceExcpmgr]) and scans its framebuffer out from its start. Each
+	 * model splits it into that framebuffer (cdram_fb, the /chosen
+	 * simple-framebuffer's reg) and the rest, which the GPU driver
+	 * allocates buffer objects from (cdram_gpu); the Vita OS divides it the
+	 * same way into ScePhyMemPartGameCdram and ScePhyMemPartShellCdram [RE
+	 * SceProcessmgr].
+	 */
+	reserved_memory: reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+	};
+
+	/*
 	 * Reference of the ARM clock. The wiki gives 27.777 MHz [WIKI
 	 * Pervasive]; PERIPHCLK measured 165.7 MHz at selector 7 (x12) and the
 	 * cycle counter 497 MHz at selector 15 (x18) [HW], so 27.616 MHz, which
@@ -676,8 +693,8 @@
 		 * PowerVR SGX543MP4+: CORE_ID 0x01174403, CORE_REVISION 0x00020106
 		 * [HW]. Power-up needs SMC 0x110 and the
 		 * SGXStart sequence before any register access; SceGpuLisr is ID 52
-		 * [WIKI SceKernelIntrMgr]. There is no open SGX543 driver, so Android
-		 * renders in software.
+		 * [WIKI SceKernelIntrMgr]. psp2sgx drives it and places buffer objects
+		 * in the model's cdram_gpu region.
 		 */
 		/*
 		 * Bank 0 at +0, the multi-core master at +0x4000 and core n at
@@ -688,6 +705,7 @@
 			compatible = "sony,vita-gpu", "img,powervr-sgx543";
 			reg = <0xe8400000 0x20000>;
 			interrupts = <GIC_SPI 20 IRQ_TYPE_LEVEL_HIGH>;
+			memory-region = <&cdram_gpu>;
 			sony,power-smc = <0x110 0>;
 			status = "okay";
 		};

@@ -27,7 +27,12 @@
 
 /* The boot loader's framebuffer, as the DTs' simple-framebuffer nodes give it. */
 #define EARLYFB_PHYS		0x20000000
-#define EARLYFB_SIZE		SZ_4M		/* 1280x720x4 fits (PS TV) */
+/*
+ * 1280x720x4 fits (PS TV). On a Vita the upper 2 MiB are the start of the
+ * GPU's CDRAM region (the DTs' cdram_gpu), which userspace maps with the
+ * same write-combined memory type.
+ */
+#define EARLYFB_SIZE		SZ_4M
 #define EARLYFB_VIRT		0xfc000000
 
 #define EARLYFB_FG		0xffffffff	/* a8b8g8r8 */

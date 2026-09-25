@@ -38,3 +38,17 @@
 		};
 	};
 };
+
+&reserved_memory {
+	/* The boot loader's 960x544x4 framebuffer, rounded up to 2 MiB */
+	cdram_fb: framebuffer@20000000 {
+		reg = <0x20000000 0x200000>;
+		no-map;
+	};
+
+	/* The rest of CDRAM: the GPU's buffer objects */
+	cdram_gpu: gpu-memory@20200000 {
+		reg = <0x20200000 0x7e00000>;
+		no-map;
+	};
+};
