@@ -166,6 +166,30 @@ int psp2sgx_vm_map_sgt(struct psp2sgx_vm *vm, u32 va, struct sg_table *sgt,
 	return at >= end ? 0 : -EINVAL;
 }
 
+/* Maps size bytes of physically contiguous memory at va; the caller holds vm->lock. */
+int psp2sgx_vm_map_contig(struct psp2sgx_vm *vm, u32 va, phys_addr_t pa,
+			  size_t size, u32 flags)
+{
+	u32 at;
+
+	/* a PTE holds address bits 31..12 */
+	if (!IS_ALIGNED(pa | size, SGX_MMU_PAGE_SIZE) ||
+	    pa + size - 1 > U32_MAX)
+		return -EINVAL;
+	for (at = 0; at < size; at += SGX_MMU_PAGE_SIZE) {
+		u32 *pte = vm_pte(vm, va + at, true);
+
+		if (!pte) {
+			psp2sgx_vm_unmap(vm, va, at);
+			return -ENOMEM;
+		}
+		*pte = (u32)(pa + at) | SGX_MMU_PTE_VALID | flags;
+	}
+	/* the PTEs out of the write buffer before a job walks them */
+	wmb();
+	return 0;
+}
+
 void psp2sgx_vm_unmap(struct psp2sgx_vm *vm, u32 va, size_t size)
 {
 	u32 at;

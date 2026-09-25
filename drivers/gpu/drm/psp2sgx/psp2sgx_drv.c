@@ -74,6 +74,9 @@ static int psp2sgx_ioctl_get_param(struct drm_device *drm, void *data,
 	case DRM_PSP2SGX_PARAM_MAX_REG_OPS:
 		args->value = PSP2SGX_MAX_REG_OPS;
 		break;
+	case DRM_PSP2SGX_PARAM_CDRAM_SIZE:
+		args->value = sgx->cdram.size;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -126,7 +129,11 @@ static const struct drm_ioctl_desc psp2sgx_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(PSP2SGX_SUBMIT, psp2sgx_ioctl_submit, DRM_RENDER_ALLOW),
 };
 
-DEFINE_DRM_GEM_FOPS(psp2sgx_fops);
+static const struct file_operations psp2sgx_fops = {
+	.owner = THIS_MODULE,
+	DRM_GEM_FOPS,
+	.show_fdinfo = drm_show_fdinfo,	/* buffer objects by memory */
+};
 
 static const struct drm_driver psp2sgx_driver = {
 	.driver_features = DRIVER_RENDER | DRIVER_GEM | DRIVER_SYNCOBJ,
@@ -140,7 +147,9 @@ static const struct drm_driver psp2sgx_driver = {
 	.major = 1,
 	.minor = 0,
 	.gem_create_object = psp2sgx_gem_create_object,
+	.gem_prime_import = psp2sgx_gem_prime_import,
 	.gem_prime_import_sg_table = drm_gem_shmem_prime_import_sg_table,
+	.show_fdinfo = psp2sgx_show_fdinfo,
 };
 
 static irqreturn_t psp2sgx_irq(int irq, void *data)
@@ -195,6 +204,11 @@ static int psp2sgx_probe(struct platform_device *pdev)
 	err = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	if (err)
 		return err;
+
+	err = psp2sgx_cdram_init(sgx);
+	if (err)
+		return err;
+	psp2sgx_cdram_debugfs_init(sgx);
 
 	err = psp2sgx_hw_power_on(sgx);
 	if (err)

@@ -5,6 +5,7 @@
 #ifndef PSP2SGX_DRV_H
 #define PSP2SGX_DRV_H
 
+#include <linux/atomic.h>
 #include <linux/io.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
@@ -46,6 +47,21 @@
 
 struct psp2sgx_vm;
 struct psp2sgx_job;
+
+/*
+ * CDRAM for buffer objects: the part of the GPU's 128 MiB of wide-IO memory
+ * the device tree gives the GPU (memory-region), allocated in physically
+ * contiguous ranges (psp2sgx_cdram.c).
+ */
+struct psp2sgx_cdram {
+	phys_addr_t base;
+	resource_size_t size;		/* 0: no region, everything in system memory */
+	struct mutex lock;		/* mm and the counters */
+	struct drm_mm mm;
+	u64 used, peak;
+	unsigned int objects;
+	u64 fallbacks;			/* CDRAM requests placed in system memory */
+};
 
 struct psp2sgx_device {
 	struct drm_device drm;
@@ -91,6 +107,11 @@ struct psp2sgx_device {
 	char selftest[64];		/* the microkernel self-test's result */
 
 	struct mutex hw_lock;		/* register programming outside IRQs */
+
+	struct psp2sgx_cdram cdram;
+	/* buffer objects in system memory, imports excluded */
+	atomic64_t shmem_bytes;
+	atomic_t shmem_objects;
 };
 
 static inline struct psp2sgx_device *to_psp2sgx(struct drm_device *drm)
@@ -173,6 +194,8 @@ static inline struct psp2sgx_vm *psp2sgx_vm_get(struct psp2sgx_vm *vm)
 }
 int psp2sgx_vm_map_sgt(struct psp2sgx_vm *vm, u32 va, struct sg_table *sgt,
 		       size_t size, u32 flags);
+int psp2sgx_vm_map_contig(struct psp2sgx_vm *vm, u32 va, phys_addr_t pa,
+			  size_t size, u32 flags);
 void psp2sgx_vm_unmap(struct psp2sgx_vm *vm, u32 va, size_t size);
 /* The PTE at va, 0 when there is no page table (diagnostics) */
 u32 psp2sgx_vm_pte_read(struct psp2sgx_vm *vm, u32 va);

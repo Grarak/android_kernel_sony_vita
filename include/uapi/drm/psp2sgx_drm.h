@@ -37,6 +37,11 @@ enum drm_psp2sgx_param {
 	DRM_PSP2SGX_PARAM_PDS_HEAP_SIZE,
 	/* maximum register operations per job */
 	DRM_PSP2SGX_PARAM_MAX_REG_OPS,
+	/*
+	 * bytes of CDRAM for buffer objects, 0 without a region; kernels that
+	 * fail this with EINVAL know neither PSP2SGX_BO_CDRAM nor placement
+	 */
+	DRM_PSP2SGX_PARAM_CDRAM_SIZE,
 };
 
 struct drm_psp2sgx_get_param {
@@ -52,12 +57,27 @@ struct drm_psp2sgx_get_param {
 #define PSP2SGX_BO_HEAP_PDS		3	/* PDS programs */
 #define PSP2SGX_BO_HEAP_MASK		0xf
 
+/*
+ * Where a buffer object's memory is (see DRM_PSP2SGX_PARAM_CDRAM_SIZE).
+ * PSP2SGX_BO_CDRAM asks for CDRAM, the GPU's own 128 MiB of wide-IO memory,
+ * which the CPU maps write-combined like system memory but reaches across
+ * the interconnect.  It is a preference: when CDRAM has no room (or the
+ * device has none) the object is placed in system memory, and
+ * bo_create.placement says where it went.  Placement does not change what
+ * can be done with the object: CDRAM and system memory objects mmap,
+ * export, import and go into jobs alike.
+ */
+#define PSP2SGX_BO_CDRAM		(1 << 4)
+
+#define PSP2SGX_BO_PLACEMENT_SYSTEM	0
+#define PSP2SGX_BO_PLACEMENT_CDRAM	1
+
 struct drm_psp2sgx_bo_create {
 	__u64 size;		/* in, bytes, rounded up to 4 KiB */
-	__u32 flags;		/* in: PSP2SGX_BO_HEAP_* */
+	__u32 flags;		/* in: PSP2SGX_BO_HEAP_* | PSP2SGX_BO_CDRAM */
 	__u32 handle;		/* out */
 	__u32 gpu_va;		/* out: address in this file's GPU address space */
-	__u32 pad;		/* must be zero */
+	__u32 placement;	/* in: zero; out: PSP2SGX_BO_PLACEMENT_* */
 };
 
 struct drm_psp2sgx_bo_info {
