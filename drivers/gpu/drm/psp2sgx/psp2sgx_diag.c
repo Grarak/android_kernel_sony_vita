@@ -2,8 +2,8 @@
 /*
  * psp2sgx: hardware checks for the DevKit.
  *
- * On the DevKit every job timed out with the host control block still
- * reading "pending, 0 runs", while a bare-metal probe had run USSE
+ * In the first DevKit runs every job timed out with the host control block
+ * still reading "pending, 0 runs", while a bare-metal probe had run USSE
  * programs on the same GPU.
  * These checks tell apart a microkernel that never starts from one that
  * starts and hangs:
