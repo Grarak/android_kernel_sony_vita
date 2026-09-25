@@ -10,6 +10,7 @@
  * IDs; GIC_SPI n below is ID - 32.
  */
 
+#include <dt-bindings/clock/sony,vita-baseclk.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
@@ -73,6 +74,9 @@
 			compatible = "arm,cortex-a9";
 			reg = <0>;
 			next-level-cache = <&l2>;
+			clocks = <&baseclk VITA_CLK_ARM>;
+			cpu-supply = <&vdda>;
+			operating-points-v2 = <&cpu_opp_table>;
 		};
 
 		cpu1: cpu@1 {
@@ -80,6 +84,9 @@
 			compatible = "arm,cortex-a9";
 			reg = <1>;
 			next-level-cache = <&l2>;
+			clocks = <&baseclk VITA_CLK_ARM>;
+			cpu-supply = <&vdda>;
+			operating-points-v2 = <&cpu_opp_table>;
 		};
 
 		cpu2: cpu@2 {
@@ -87,6 +94,9 @@
 			compatible = "arm,cortex-a9";
 			reg = <2>;
 			next-level-cache = <&l2>;
+			clocks = <&baseclk VITA_CLK_ARM>;
+			cpu-supply = <&vdda>;
+			operating-points-v2 = <&cpu_opp_table>;
 		};
 
 		cpu3: cpu@3 {
@@ -94,22 +104,118 @@
 			compatible = "arm,cortex-a9";
 			reg = <3>;
 			next-level-cache = <&l2>;
+			clocks = <&baseclk VITA_CLK_ARM>;
+			cpu-supply = <&vdda>;
+			operating-points-v2 = <&cpu_opp_table>;
+		};
+	};
+
+	/*
+	 * The ARM clock's operating points: the selectors whose L2 clock is the
+	 * core clock, the ones ScePower uses and the boot loader's 500 MHz
+	 * (drivers/clk/clk-vita.c), at 27.616 MHz times 1.5, 3, 4, 6, 8, 12, 16
+	 * and 18. Each OPP names the ScePervasiveVid cell ScePower takes for
+	 * its level (power.skprx 3.65 0x810098e0), 500 MHz the one for 444 MHz
+	 * as the boot loader does; the driver sets the voltage from it. The
+	 * opp-microvolt values are those of the wiki's example chip.
+	 * clock-latency-ns covers the Syscon voltage command, an estimate.
+	 */
+	cpu_opp_table: opp-table-cpu {
+		compatible = "sony,vita-operating-points";
+		opp-shared;
+
+		opp-41424000 {
+			opp-hz = /bits/ 64 <41424000>;
+			opp-microvolt = <890000>;
+			clock-latency-ns = <1000000>;
+			nvmem-cells = <&vid_arm_111>;
+			nvmem-cell-names = "vid";
+		};
+
+		opp-82848000 {
+			opp-hz = /bits/ 64 <82848000>;
+			opp-microvolt = <890000>;
+			clock-latency-ns = <1000000>;
+			nvmem-cells = <&vid_arm_111>;
+			nvmem-cell-names = "vid";
+		};
+
+		opp-110464000 {
+			opp-hz = /bits/ 64 <110464000>;
+			opp-microvolt = <890000>;
+			clock-latency-ns = <1000000>;
+			nvmem-cells = <&vid_arm_111>;
+			nvmem-cell-names = "vid";
+		};
+
+		opp-165696000 {
+			opp-hz = /bits/ 64 <165696000>;
+			opp-microvolt = <890000>;
+			clock-latency-ns = <1000000>;
+			nvmem-cells = <&vid_arm_166>;
+			nvmem-cell-names = "vid";
+		};
+
+		opp-220928000 {
+			opp-hz = /bits/ 64 <220928000>;
+			opp-microvolt = <910000>;
+			clock-latency-ns = <1000000>;
+			nvmem-cells = <&vid_arm_222>;
+			nvmem-cell-names = "vid";
+		};
+
+		opp-331392000 {
+			opp-hz = /bits/ 64 <331392000>;
+			opp-microvolt = <990000>;
+			clock-latency-ns = <1000000>;
+			nvmem-cells = <&vid_arm_333>;
+			nvmem-cell-names = "vid";
+		};
+
+		opp-441856000 {
+			opp-hz = /bits/ 64 <441856000>;
+			opp-microvolt = <1070000>;
+			clock-latency-ns = <1000000>;
+			nvmem-cells = <&vid_arm_444>;
+			nvmem-cell-names = "vid";
+		};
+
+		opp-497088000 {
+			opp-hz = /bits/ 64 <497088000>;
+			opp-microvolt = <1070000>;
+			clock-latency-ns = <1000000>;
+			nvmem-cells = <&vid_arm_444>;
+			nvmem-cell-names = "vid";
 		};
 	};
 
 	/* The memory node is per model: 512 MiB retail, 1 GiB DevKit */
 
 	/*
-	 * PERIPHCLK of the MPCore private block, which clocks the global timer
-	 * and the private (TWD) timers: ~165.7 MHz measured [HW, gic.c GT/PT].
-	 * (That is CPUCLK/2 for the 333 MHz ARM clock; the ARM clock is
-	 * 27.777 MHz * mult * (1 - div/16) from ScePervasiveBaseClk [WIKI].)
-	 * xerpi's tree assumed 144 MHz.
+	 * Reference of the ARM clock. The wiki gives 27.777 MHz [WIKI
+	 * Pervasive]; PERIPHCLK measured 165.7 MHz at selector 7 (x12) and the
+	 * cycle counter 497 MHz at selector 15 (x18) [HW], so 27.616 MHz, which
+	 * puts every operating point on a whole kHz.
 	 */
-	periphclk: periphclk {
+	armref: armref {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
-		clock-frequency = <165700000>;
+		clock-frequency = <27616000>;
+		clock-output-names = "armref";
+	};
+
+	/*
+	 * PERIPHCLK of the MPCore private block, which clocks the global timer
+	 * and the private (TWD) timers: the ARM clock divided by two. The TWD
+	 * follows its rate changes. (The boot loader still sets a
+	 * clock-frequency here, which a fixed-factor clock ignores.)
+	 */
+	periphclk: periphclk {
+		compatible = "fixed-factor-clock";
+		#clock-cells = <0>;
+		clocks = <&baseclk VITA_CLK_ARM>;
+		clock-div = <2>;
+		clock-mult = <1>;
 		clock-output-names = "periphclk";
 	};
 
@@ -439,6 +545,26 @@
 				wlanbt_pwrseq: syscon-wlanbt-pwrseq {
 					compatible = "vita,syscon-wlanbt-pwrseq";
 				};
+
+				/*
+				 * Core rails, Syscon command 0x088E. VDDA feeds
+				 * the ARM cores and L2; the limits bound the
+				 * voltages the chip's IDs can ask for. The boot
+				 * loader leaves VDDA at its 444 MHz voltage
+				 * (clocks_max(), ScePervasiveVid +0x04).
+				 */
+				syscon-regulator {
+					compatible = "sony,vita-syscon-regulator";
+
+					vdda: vdda {
+						regulator-name = "vdda";
+						regulator-min-microvolt = <800000>;
+						regulator-max-microvolt = <1200000>;
+						regulator-always-on;
+						nvmem-cells = <&vid_arm_444>;
+						nvmem-cell-names = "boot-vid";
+					};
+				};
 			};
 		};
 
@@ -447,6 +573,52 @@
 			compatible = "vita,reset";
 			#reset-cells = <1>;
 			reg = <0xe3101000 0x1000>;
+		};
+
+		/* ScePervasiveBaseClk: clock multipliers and dividers [WIKI Pervasive] */
+		baseclk: clock-controller@e3103000 {
+			compatible = "sony,vita-baseclk";
+			reg = <0xe3103000 0x1000>;
+			clocks = <&armref>;
+			clock-names = "ref";
+			#clock-cells = <1>;
+		};
+
+		/*
+		 * ScePervasiveVid: the chip's voltage IDs; the VDDA words
+		 * by the ARM clock level ScePower takes them for [WIKI
+		 * Pervasive, power.skprx 3.65 0x8100399c].
+		 */
+		vid: efuse@e3104000 {
+			compatible = "sony,vita-vid";
+			reg = <0xe3104000 0x100>;
+			read-only;
+
+			nvmem-layout {
+				compatible = "fixed-layout";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				vid_arm_444: vid@4 {
+					reg = <0x04 0x4>;
+				};
+
+				vid_arm_333: vid@8 {
+					reg = <0x08 0x4>;
+				};
+
+				vid_arm_222: vid@c {
+					reg = <0x0c 0x4>;
+				};
+
+				vid_arm_166: vid@10 {
+					reg = <0x10 0x4>;
+				};
+
+				vid_arm_111: vid@14 {
+					reg = <0x14 0x4>;
+				};
+			};
 		};
 
 		/*

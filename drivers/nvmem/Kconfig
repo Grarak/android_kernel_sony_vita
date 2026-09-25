@@ -561,6 +561,18 @@ config NVMEM_VF610_OCOTP
 	  This driver can also be build as a module. If so, the module will
 	  be called nvmem-vf610-ocotp.
 
+config NVMEM_VITA_VID
+	tristate "PlayStation Vita voltage IDs"
+	depends on ARCH_VITA || COMPILE_TEST
+	depends on HAS_IOMEM
+	default ARCH_VITA
+	help
+	  The PlayStation Vita chip's own voltage IDs (ScePervasiveVid), from
+	  which the CPU frequency driver takes each operating point's voltage.
+
+	  This driver can also be built as a module. If so, the module
+	  will be called nvmem-vita-vid.
+
 config NVMEM_ZYNQMP
 	tristate "Xilinx ZYNQMP SoC nvmem firmware support"
 	depends on ARCH_ZYNQMP

@@ -1851,6 +1851,14 @@ config REGULATOR_VEXPRESS
 	  This driver provides support for voltage regulators available
 	  on the ARM Ltd's Versatile Express platform.
 
+config REGULATOR_VITA_SYSCON
+	tristate "PlayStation Vita Syscon core rails"
+	depends on MFD_VITA_SYSCON
+	help
+	  The PlayStation Vita's core rails (VDD, VDDA, VDDC and VDDG), which
+	  the Syscon (Ernie) sets on request. The CPU frequency driver scales
+	  VDDA, the ARM cores' rail, with the ARM clock.
+
 config REGULATOR_VQMMC_IPQ4019
 	tristate "IPQ4019 VQMMC SD LDO regulator support"
 	depends on ARCH_QCOM

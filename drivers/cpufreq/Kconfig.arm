@@ -266,6 +266,17 @@ config ARM_TI_CPUFREQ
 	  data provided. Required for cpufreq support on AM335x, AM437x,
 	  DRA7x, and AM57x platforms.
 
+config ARM_VITA_CPUFREQ
+	tristate "PlayStation Vita CPUFreq support"
+	depends on ARCH_VITA || COMPILE_TEST
+	depends on NVMEM && REGULATOR && OF
+	select PM_OPP
+	default ARCH_VITA
+	help
+	  Scales the PlayStation Vita's ARM clock and VDDA rail through the
+	  operating points of the device tree, at the voltages the chip's own
+	  voltage IDs (ScePervasiveVid) give for them.
+
 config ARM_PXA2xx_CPUFREQ
 	tristate "Intel PXA2xx CPUfreq driver"
 	depends on PXA27x || PXA25x || COMPILE_TEST

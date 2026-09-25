@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/opp/sony,vita-operating-points.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: PlayStation Vita CPU OPP table
+
+maintainers:
+  - Willi Ye <williye97@gmail.com>
+
+description: |
+  The voltage each ARM clock level needs differs from chip to chip. Each OPP
+  names the voltage ID cell (sony,vita-vid) for its level; the CPU frequency
+  driver replaces the OPP's opp-microvolt with 1.38 V less that ID in 10 mV
+  steps, and disables an OPP whose ID is 0.
+
+allOf:
+  - $ref: opp-v2-base.yaml#
+
+properties:
+  compatible:
+    const: sony,vita-operating-points
+
+  opp-shared: true
+
+required:
+  - compatible
+
+patternProperties:
+  "^opp-[0-9]+$":
+    type: object
+
+    properties:
+      opp-hz: true
+      opp-microvolt: true
+      clock-latency-ns: true
+
+      nvmem-cells:
+        maxItems: 1
+        description: The voltage ID cell for this level
+
+      nvmem-cell-names:
+        const: vid
+
+    required:
+      - opp-hz
+      - opp-microvolt
+      - nvmem-cells
+      - nvmem-cell-names
+
+    unevaluatedProperties: false
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    opp-table {
+        compatible = "sony,vita-operating-points";
+        opp-shared;
+
+        opp-497088000 {
+            opp-hz = /bits/ 64 <497088000>;
+            opp-microvolt = <1070000>;
+            clock-latency-ns = <1000000>;
+            nvmem-cells = <&vid_arm_444>;
+            nvmem-cell-names = "vid";
+        };
+    };

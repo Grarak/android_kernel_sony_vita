@@ -11,6 +11,13 @@
 #ifndef __LINUX_MFD_VITA_SYSCON_H
 #define __LINUX_MFD_VITA_SYSCON_H
 
+#include <linux/completion.h>
+#include <linux/types.h>
+
+struct device;
+struct gpio_desc;
+struct spi_device;
+
 #define SYSCON_TX_HEADER_SIZE	3
 #define SYSCON_TX_CMD_LO	0
 #define SYSCON_TX_CMD_HI	1

@@ -438,6 +438,16 @@ config COMMON_CLK_VC7
 	  Renesas Versaclock7 is a family of configurable clock generator
 	  and jitter attenuator ICs with fractional and integer dividers.
 
+config COMMON_CLK_VITA
+	bool "PlayStation Vita ARM clock" if COMPILE_TEST
+	depends on ARCH_VITA || COMPILE_TEST
+	depends on OF
+	default ARCH_VITA
+	help
+	  The PlayStation Vita's ARM clock, set through ScePervasiveBaseClk
+	  in the steps the Vita OS takes. The CPU frequency driver
+	  (ARM_VITA_CPUFREQ) scales it.
+
 config COMMON_CLK_STM32F
 	def_bool COMMON_CLK && (MACH_STM32F429 || MACH_STM32F469 || MACH_STM32F746)
 	help

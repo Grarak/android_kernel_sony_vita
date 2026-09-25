@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/clock/sony,vita-baseclk.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: PlayStation Vita base clock controller (ScePervasiveBaseClk)
+
+maintainers:
+  - Willi Ye <williye97@gmail.com>
+
+description: |
+  The clock multipliers and dividers of the PlayStation Vita's CXD5315GG SoC.
+  The ARM clock, which also clocks the L2 cache and, divided by two, the
+  Cortex-A9 private timers, is the reference clock times a selectable
+  multiplier. The clock IDs are in include/dt-bindings/clock/sony,vita-baseclk.h.
+
+properties:
+  compatible:
+    const: sony,vita-baseclk
+
+  reg:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: Reference clock of the ARM clock
+
+  clock-names:
+    items:
+      - const: ref
+
+  '#clock-cells':
+    const: 1
+
+required:
+  - compatible
+  - reg
+  - clocks
+  - '#clock-cells'
+
+additionalProperties: false
+
+examples:
+  - |
+    clock-controller@e3103000 {
+        compatible = "sony,vita-baseclk";
+        reg = <0xe3103000 0x1000>;
+        clocks = <&armref>;
+        clock-names = "ref";
+        #clock-cells = <1>;
+    };
