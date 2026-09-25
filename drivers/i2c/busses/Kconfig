@@ -1258,6 +1258,15 @@ config I2C_UNIPHIER_F
 	  the UniPhier FIFO-builtin I2C interface embedded in PH1-Pro4,
 	  PH1-Pro5, or newer UniPhier SoCs.
 
+config I2C_VITA
+	tristate "PlayStation Vita I2C controller"
+	depends on ARCH_VITA || COMPILE_TEST
+	depends on OF
+	help
+	  The two I2C controllers of the PlayStation Vita's SoC, which
+	  carry the audio codec, the camera sensors, the clock generator
+	  and the HDMI bridge.
+
 config I2C_VERSATILE
 	tristate "ARM Versatile/Realview I2C bus support"
 	depends on ARCH_MPS2 || ARCH_VERSATILE || ARCH_REALVIEW || ARCH_VEXPRESS || COMPILE_TEST

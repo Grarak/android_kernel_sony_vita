@@ -122,6 +122,7 @@ obj-$(CONFIG_I2C_TEGRA_BPMP)	+= i2c-tegra-bpmp.o
 obj-$(CONFIG_I2C_UNIPHIER)	+= i2c-uniphier.o
 obj-$(CONFIG_I2C_UNIPHIER_F)	+= i2c-uniphier-f.o
 obj-$(CONFIG_I2C_VERSATILE)	+= i2c-versatile.o
+obj-$(CONFIG_I2C_VITA)		+= i2c-vita.o
 obj-$(CONFIG_I2C_WMT)		+= i2c-viai2c-wmt.o i2c-viai2c-common.o
 obj-$(CONFIG_I2C_OCTEON)	+= i2c-octeon.o
 i2c-octeon-y			:= i2c-octeon-core.o i2c-octeon-platdrv.o

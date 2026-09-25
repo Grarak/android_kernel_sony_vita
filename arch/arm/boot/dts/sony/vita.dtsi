@@ -568,6 +568,33 @@
 			};
 		};
 
+		/*
+		 * SceI2c0Reg/SceI2c1Reg [WIKI I2C_Registers]: IDs 142/143 [RE
+		 * SceLowio], ScePervasiveReset +0x110 + 4n. Speed mode 5
+		 * is what SceLowio sets on Hardware Info below 0x800000.
+		 * Bus 0: codec 0x1a, clock generator 0x69, back camera 0x3a;
+		 * bus 1: front camera 0x3a, HDMI bridge [RE].
+		 */
+		i2c0: i2c@e0500000 {
+			compatible = "sony,vita-i2c";
+			reg = <0xe0500000 0x1000>;
+			interrupts = <GIC_SPI 110 IRQ_TYPE_LEVEL_HIGH>;
+			resets = <&reset 68>;
+			sony,speed-mode = <5>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		i2c1: i2c@e0510000 {
+			compatible = "sony,vita-i2c";
+			reg = <0xe0510000 0x1000>;
+			interrupts = <GIC_SPI 111 IRQ_TYPE_LEVEL_HIGH>;
+			resets = <&reset 69>;
+			sony,speed-mode = <5>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
 		/* ScePervasiveReset: one bit per device, set = held in reset [WIKI Pervasive] */
 		reset: reset@e3101000 {
 			compatible = "vita,reset";
