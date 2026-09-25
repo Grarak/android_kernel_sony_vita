@@ -8,9 +8,21 @@
  * time: it copies the code to the kernel region, points the MMU at the
  * job's address space, posts the job in the host control block and kicks
  * core 0.  The microkernel's SW_EVENT interrupt completes it.
+ *
+ * With host_waits (the default) a render's waits do not run in the
+ * microkernel.  The job is cut at each wait into steps: code, which one
+ * microkernel run executes, and waits, which the host polls from the CPU
+ * between runs.  A microkernel that polls for a whole render keeps a thread
+ * on core 0's USSE the render itself needs: on the DevKit a 3D wait gave
+ * up after 275 ms with PIXELBE_END_RENDER in
+ * cores 1 to 3 only, and core 0 had it by the time the host looked, right
+ * after the microkernel had stopped polling.  Sony's microkernel never
+ * waits for a render either: it returns and runs again on the next event.
  */
+#include <linux/delay.h>
 #include <linux/dma-fence.h>
 #include <linux/file.h>
+#include <linux/ktime.h>
 #include <linux/sync_file.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
@@ -29,6 +41,24 @@ module_param_named(wait_yield, sgx_mk_wait_yield, uint, 0444);
 MODULE_PARM_DESC(wait_yield,
 		 "register reads per poll round of a job's waits, 0-16 (default 0)");
 
+static bool host_waits = true;
+module_param(host_waits, bool, 0444);
+MODULE_PARM_DESC(host_waits,
+		 "The host polls a render's waits between microkernel runs (default: true); 0: the microkernel polls them");
+
+/* Room for all of a job's code: host_waits cuts it into runs */
+#define JOB_CODE_TOTAL		(2 * SGX_MK_JOB_CODE_MAX)
+
+enum { STEP_CODE, STEP_WAIT };
+enum { WAIT_TA, WAIT_3D, WAIT_OTHER };
+
+struct psp2sgx_step {
+	u8 kind;
+	u8 what;			/* STEP_WAIT: WAIT_*, for the statistics */
+	u32 reg, mask, value;		/* STEP_WAIT: until (reg & mask) == value */
+	u32 start, len;			/* STEP_CODE: instructions in job->code */
+};
+
 struct psp2sgx_job {
 	struct drm_sched_job base;
 	struct psp2sgx_device *sgx;
@@ -38,6 +68,10 @@ struct psp2sgx_job {
 	u32 nr_bos;
 	u64 *code;
 	u32 code_len;
+	struct psp2sgx_step *steps;
+	u32 nr_steps, max_steps;
+	u32 step;			/* the next step to run (hw_lock) */
+	u32 kick;			/* kick_seqno of its last microkernel run */
 	u32 seqno;
 	struct dma_fence *done;		/* the hardware fence */
 };
@@ -168,17 +202,99 @@ static int check_write(u32 reg, u32 value)
 }
 
 /*
+ * A job under construction: microkernel code and, with host_waits, the
+ * waits between its runs.  Without host_waits the whole job is one run and
+ * its waits are microkernel polls.
+ */
+struct job_build {
+	struct psp2sgx_job *job;
+	struct sgx_mk_job j;		/* the open run */
+	bool open;
+	bool host;			/* host_waits */
+	u32 used;			/* instructions of job->code taken */
+	int err;
+};
+
+static struct psp2sgx_step *add_step(struct job_build *b)
+{
+	struct psp2sgx_job *job = b->job;
+
+	if (job->nr_steps == job->max_steps) {
+		b->err = -E2BIG;
+		return NULL;
+	}
+	return memset(&job->steps[job->nr_steps++], 0, sizeof(*job->steps));
+}
+
+/* The open run, begun if there is none */
+static struct sgx_mk_job *run(struct job_build *b)
+{
+	if (!b->open) {
+		sgx_mk_job_begin(&b->j, b->job->code + b->used,
+				 min_t(u32, JOB_CODE_TOTAL - b->used, SGX_MK_JOB_CODE_MAX));
+		b->open = true;
+	}
+	return &b->j;
+}
+
+static void end_run(struct job_build *b)
+{
+	struct psp2sgx_step *s;
+	int err;
+
+	if (!b->open)
+		return;
+	b->open = false;
+	err = sgx_mk_job_end(&b->j);
+	if (err) {
+		b->err = b->err ?: err;
+		return;
+	}
+	s = add_step(b);
+	if (!s)
+		return;
+	s->kind = STEP_CODE;
+	s->start = b->used;
+	s->len = b->j.a.len;
+	b->used += b->j.a.len;
+}
+
+static void write_reg(struct job_build *b, u32 reg, u32 value)
+{
+	sgx_mk_job_write(run(b), reg, value);
+}
+
+static void wait_reg(struct job_build *b, u32 reg, u32 mask, u32 value, u8 what)
+{
+	struct psp2sgx_step *s;
+
+	if (!b->host) {
+		sgx_mk_job_wait(run(b), reg, mask, value, PSP2SGX_WAIT_MAX_POLLS);
+		return;
+	}
+	end_run(b);
+	s = add_step(b);
+	if (!s)
+		return;
+	s->kind = STEP_WAIT;
+	s->what = what;
+	s->reg = reg;
+	s->mask = mask;
+	s->value = value;
+}
+
+/*
  * A bank 0 host clear does not reach the core banks: on the DevKit every
  * core still held OTPM_INV and DPM_CONTROL_CLEAR (0x04100200) after the
  * render cleared them in bank 0, and core 0 is one of the views a wait
  * accepts (psp2sgx_mk.c), so a stale bit there would end the next wait early.
  */
-static void clear_cores(struct sgx_mk_job *j, u32 reg, u32 value)
+static void clear_cores(struct job_build *b, u32 reg, u32 value)
 {
 	unsigned int n;
 
 	for (n = 0; n < PSP2SGX_NUM_CORES; n++)
-		sgx_mk_job_write(j, SGX_CORE_BANK(n) + reg, value);
+		write_reg(b, SGX_CORE_BANK(n) + reg, value);
 }
 
 /*
@@ -192,20 +308,20 @@ static void clear_cores(struct sgx_mk_job *j, u32 reg, u32 value)
  * core's tiling units to go idle.  That holds for a core that got no batch
  * too, which a wait for each core's own TA_FINISHED would not.
  */
-static void clear_ta_finished(struct sgx_mk_job *j)
+static void clear_ta_finished(struct job_build *b)
 {
-	sgx_mk_job_write(j, SGX_EVENT_HOST_CLEAR, SGX_EVENT_TA_FINISHED);
-	sgx_mk_job_write(j, SGX_MASTER_EVENT_HOST_CLEAR, SGX_EVENT_TA_FINISHED);
-	clear_cores(j, SGX_EVENT_HOST_CLEAR, SGX_EVENT_TA_FINISHED);
+	write_reg(b, SGX_EVENT_HOST_CLEAR, SGX_EVENT_TA_FINISHED);
+	write_reg(b, SGX_MASTER_EVENT_HOST_CLEAR, SGX_EVENT_TA_FINISHED);
+	clear_cores(b, SGX_EVENT_HOST_CLEAR, SGX_EVENT_TA_FINISHED);
 }
 
-static void wait_ta_idle(struct sgx_mk_job *j)
+static void wait_ta_idle(struct job_build *b)
 {
 	unsigned int n;
 
 	for (n = 0; n < psp2sgx_hw_cores(); n++)
-		sgx_mk_job_wait(j, SGX_CORE_BANK(n) + SGX_CLKGATESTATUS,
-				SGX_CLKGATESTATUS_TA_UNITS, 0, PSP2SGX_WAIT_MAX_POLLS);
+		wait_reg(b, SGX_CORE_BANK(n) + SGX_CLKGATESTATUS,
+			 SGX_CLKGATESTATUS_TA_UNITS, 0, WAIT_OTHER);
 }
 
 /*
@@ -218,13 +334,13 @@ static void wait_ta_idle(struct sgx_mk_job *j)
  * next job's directory switch, and they never finished.  So a render ends
  * when every core's pixel units are idle.
  */
-static void wait_3d_idle(struct sgx_mk_job *j)
+static void wait_3d_idle(struct job_build *b)
 {
 	unsigned int n;
 
 	for (n = 0; n < psp2sgx_hw_cores(); n++)
-		sgx_mk_job_wait(j, SGX_CORE_BANK(n) + SGX_CLKGATESTATUS,
-				SGX_CLKGATESTATUS_3D_UNITS, 0, PSP2SGX_WAIT_MAX_POLLS);
+		wait_reg(b, SGX_CORE_BANK(n) + SGX_CLKGATESTATUS,
+			 SGX_CLKGATESTATUS_3D_UNITS, 0, WAIT_OTHER);
 }
 
 /*
@@ -235,65 +351,69 @@ static void wait_3d_idle(struct sgx_mk_job *j)
  * never got a batch); after the tail pointer cache flush, an ISP2 soft reset
  * pulse in bank 0 before the 3D set-up.
  */
-static void ta_done(struct sgx_mk_job *j)
+static void ta_done(struct job_build *b)
 {
-	sgx_mk_job_write(j, SGX_MASTER_VDM_BATCH_NUM, 1);
-	sgx_mk_job_write(j, SGX_MASTER_VDM_BATCH_NUM, 0);
-	sgx_mk_job_write(j, SGX_VDM_BATCH_NUM, 1);
-	sgx_mk_job_write(j, SGX_VDM_BATCH_NUM, 0);
+	write_reg(b, SGX_MASTER_VDM_BATCH_NUM, 1);
+	write_reg(b, SGX_MASTER_VDM_BATCH_NUM, 0);
+	write_reg(b, SGX_VDM_BATCH_NUM, 1);
+	write_reg(b, SGX_VDM_BATCH_NUM, 0);
 }
 
-static void tpc_flushed(struct sgx_mk_job *j)
+static void tpc_flushed(struct job_build *b)
 {
-	sgx_mk_job_write(j, SGX_SOFT_RESET, SGX_SOFT_RESET_ISP2);
-	sgx_mk_job_write(j, SGX_SOFT_RESET, 0);
+	write_reg(b, SGX_SOFT_RESET, SGX_SOFT_RESET_ISP2);
+	write_reg(b, SGX_SOFT_RESET, 0);
 }
 
-static int build_render(struct sgx_mk_job *j,
+static int build_render(struct job_build *b,
 			const struct drm_psp2sgx_reg_op *ops, u32 n)
 {
 	u32 i;
 
 	for (i = 0; i < n; i++) {
 		const struct drm_psp2sgx_reg_op *op = &ops[i];
+		bool event = op->reg == SGX_EVENT_STATUS ||
+			     op->reg == SGX_MASTER_EVENT_STATUS;
+		u32 met = op->mask & op->value;
 
 		switch (op->op) {
 		case PSP2SGX_REG_WRITE:
 			if (check_write(op->reg, op->value))
 				return -EPERM;
 			if (op->reg == SGX_VDM_START)
-				clear_ta_finished(j);
-			sgx_mk_job_write(j, op->reg, op->value);
+				clear_ta_finished(b);
+			write_reg(b, op->reg, op->value);
 			if (op->reg == SGX_EVENT_HOST_CLEAR || op->reg == SGX_EVENT_HOST_CLEAR2)
-				clear_cores(j, op->reg, op->value);
+				clear_cores(b, op->reg, op->value);
 			break;
 		case PSP2SGX_REG_WAIT:
 			if (!reg_in(wait_ok, ARRAY_SIZE(wait_ok), op->reg))
 				return -EPERM;
-			sgx_mk_job_wait(j, op->reg, op->mask, op->value & op->mask,
-					PSP2SGX_WAIT_MAX_POLLS);
-			if ((op->reg == SGX_EVENT_STATUS || op->reg == SGX_MASTER_EVENT_STATUS) &&
-			    op->mask & op->value & SGX_EVENT_TA_FINISHED) {
-				wait_ta_idle(j);
-				ta_done(j);
+			wait_reg(b, op->reg, op->mask, met,
+				 event && met & SGX_EVENT_TA_FINISHED ? WAIT_TA :
+				 event && met & SGX_EVENT_PIXELBE_END_RENDER ? WAIT_3D :
+				 WAIT_OTHER);
+			if (event && met & SGX_EVENT_TA_FINISHED) {
+				wait_ta_idle(b);
+				ta_done(b);
 			}
-			if (op->reg == SGX_EVENT_STATUS &&
-			    op->mask & op->value & SGX_EVENT_TPC_FLUSH)
-				tpc_flushed(j);
-			if ((op->reg == SGX_EVENT_STATUS || op->reg == SGX_MASTER_EVENT_STATUS) &&
-			    op->mask & op->value & SGX_EVENT_PIXELBE_END_RENDER)
-				wait_3d_idle(j);
+			if (op->reg == SGX_EVENT_STATUS && met & SGX_EVENT_TPC_FLUSH)
+				tpc_flushed(b);
+			if (event && met & SGX_EVENT_PIXELBE_END_RENDER)
+				wait_3d_idle(b);
 			break;
 		default:
 			return -EINVAL;
 		}
-		if (j->a.err)
-			return j->a.err;
+		if (b->err)
+			return b->err;
+		if (b->open && b->j.a.err)
+			return b->j.a.err;
 	}
 	return 0;
 }
 
-static int build_task(struct sgx_mk_job *j, const struct drm_psp2sgx_task *t)
+static int build_task(struct job_build *b, const struct drm_psp2sgx_task *t)
 {
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -301,22 +421,30 @@ static int build_task(struct sgx_mk_job *j, const struct drm_psp2sgx_task *t)
 	    t->sideband >> 14 || t->pds_addr & 0xf || t->pad)
 		return -EINVAL;
 	/* the task word as Sony's microkernel builds it (0x800900: 1 unit, 9) */
-	sgx_mk_job_task(j, t->data_units << 23 | t->attr_size << 8, t->pds_addr,
+	sgx_mk_job_task(run(b), t->data_units << 23 | t->attr_size << 8, t->pds_addr,
 			t->ir0, t->sideband);
-	return j->a.err;
+	return b->j.a.err;
 }
 
 static int build_code(struct psp2sgx_job *job, const struct drm_psp2sgx_submit *args)
 {
 	void __user *cmds = u64_to_user_ptr(args->cmds);
-	struct sgx_mk_job j;
+	struct job_build b = { .job = job, .host = host_waits };
 	void *buf = NULL;
+	u32 waits;
 	int err;
 
-	job->code = kvmalloc_array(SGX_MK_JOB_CODE_MAX, sizeof(u64), GFP_KERNEL);
-	if (!job->code)
+	if (args->type == PSP2SGX_JOB_RENDER &&
+	    (!args->nr_cmds || args->nr_cmds > PSP2SGX_MAX_REG_OPS))
+		return -EINVAL;
+	/* each operation is at most one wait and one wait per core after it */
+	waits = args->type == PSP2SGX_JOB_RENDER ?
+		args->nr_cmds * (1 + PSP2SGX_NUM_CORES) : 0;
+	job->max_steps = 2 * waits + 2;
+	job->steps = kvmalloc_array(job->max_steps, sizeof(*job->steps), GFP_KERNEL);
+	job->code = kvmalloc_array(JOB_CODE_TOTAL, sizeof(u64), GFP_KERNEL);
+	if (!job->steps || !job->code)
 		return -ENOMEM;
-	sgx_mk_job_begin(&j, job->code, SGX_MK_JOB_CODE_MAX);
 	/*
 	 * What Sony's microkernel writes before every TA and 3D kick (a
 	 * register trace of the shell): the USSE clocks forced on, and the
@@ -327,18 +455,16 @@ static int build_code(struct psp2sgx_job *job, const struct drm_psp2sgx_submit *
 	 * The clocks go back to automatic gating when the job ends, as Sony's
 	 * do; a job that gives up early leaves them on.
 	 */
-	sgx_mk_job_write(&j, SGX_CLKGATECTL2, SGX_CLKGATECTL2_USE_ON);
-	sgx_mk_job_write(&j, SGX_DMS_CTRL, SGX_DMS_CTRL_JOB);
+	write_reg(&b, SGX_CLKGATECTL2, SGX_CLKGATECTL2_USE_ON);
+	write_reg(&b, SGX_DMS_CTRL, SGX_DMS_CTRL_JOB);
 
 	switch (args->type) {
 	case PSP2SGX_JOB_RENDER:
-		if (!args->nr_cmds || args->nr_cmds > PSP2SGX_MAX_REG_OPS)
-			return -EINVAL;
 		buf = memdup_array_user(cmds, args->nr_cmds,
 					sizeof(struct drm_psp2sgx_reg_op));
 		if (IS_ERR(buf))
 			return PTR_ERR(buf);
-		err = build_render(&j, buf, args->nr_cmds);
+		err = build_render(&b, buf, args->nr_cmds);
 		break;
 	case PSP2SGX_JOB_TASK:
 		if (args->nr_cmds != 1)
@@ -346,30 +472,227 @@ static int build_code(struct psp2sgx_job *job, const struct drm_psp2sgx_submit *
 		buf = memdup_user(cmds, sizeof(struct drm_psp2sgx_task));
 		if (IS_ERR(buf))
 			return PTR_ERR(buf);
-		err = build_task(&j, buf);
+		err = build_task(&b, buf);
 		break;
 	default:
 		return -EINVAL;
 	}
 	kfree(buf);
-	if (!err) {
-		sgx_mk_job_write(&j, SGX_CLKGATECTL2, SGX_CLKGATECTL2_AUTO);
-		err = sgx_mk_job_end(&j);
-	}
-	job->code_len = j.a.len;
-	return err;
+	if (err)
+		return err;
+	write_reg(&b, SGX_CLKGATECTL2, SGX_CLKGATECTL2_AUTO);
+	end_run(&b);
+	job->code_len = b.used;
+	return b.err;
 }
 
 /* ------------------------------------------------------------------ scheduler */
+
+static void report_polls(struct psp2sgx_device *sgx, const char *why);
+static void report_fault_bos(struct psp2sgx_device *sgx, struct psp2sgx_job *job);
+
+/* Complete job on the hardware fence, unless a timeout took it already. */
+static void finish_job(struct psp2sgx_device *sgx, struct psp2sgx_job *job, int err)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sgx->fence_lock, flags);
+	if (sgx->current_job == job) {
+		sgx->current_job = NULL;
+		if (err)
+			dma_fence_set_error(job->done, err);
+		dma_fence_signal_locked(job->done);
+	}
+	spin_unlock_irqrestore(&sgx->fence_lock, flags);
+}
+
+/* Post one microkernel run of the job's code; hw_lock held. */
+static void kick_code(struct psp2sgx_device *sgx, struct psp2sgx_job *job,
+		      const struct psp2sgx_step *s, bool first)
+{
+	u32 *hc = psp2sgx_hostctl(sgx);
+	unsigned int i;
+
+	/*
+	 * Empty the SLC before touching the host control block.  The
+	 * microkernel runs on every event, also after the job's completion
+	 * interrupt, and its run count store leaves the block's line dirty in
+	 * the SLC with the old state.  A flush after the writes below wrote
+	 * that line back over them: on the DevKit job 2 read "idle, job 1"
+	 * and timed out (2026-09-24).
+	 */
+	if (psp2sgx_hw_slc_flush(sgx))
+		dev_warn_ratelimited(sgx->dev, "SLC flush timed out\n");
+	psp2sgx_put_code((u8 *)sgx->kregion + SGX_MK_JOB_CODE, job->code + s->start,
+			 s->len);
+	WRITE_ONCE(job->kick, ++sgx->kick_seqno);
+	WRITE_ONCE(hc[SGX_HC_JOB_SEQNO], job->kick);
+	WRITE_ONCE(hc[SGX_HC_ERROR], 0);
+	for (i = SGX_HC_DIAG_TA; i < SGX_HC_WORDS; i++)
+		WRITE_ONCE(hc[i], 0);
+	wmb();
+	WRITE_ONCE(hc[SGX_HC_STATE], SGX_MK_PENDING);
+	if (first) {
+		psp2sgx_hw_wait_cores_idle(sgx, job->seqno);
+		psp2sgx_hw_set_vm(sgx, job->vm);
+	}
+	/*
+	 * The GPU must see the code, the job and the tables, not stale lines;
+	 * every run of a job has its code at the same address.
+	 */
+	if (psp2sgx_hw_slc_flush(sgx) || psp2sgx_hw_invalidate_caches(sgx))
+		dev_warn_ratelimited(sgx->dev, "cache maintenance timed out\n");
+	psp2sgx_hw_kick(sgx);
+}
+
+/*
+ * A host wait is met as the microkernel's is (psp2sgx_mk.c): EVENT_STATUS
+ * in bank 0 or the master by the bits in any of bank 0, the master and
+ * core 0; EVENT_STATUS2 in bank 0 by bank 0 or core 0.
+ */
+static bool wait_met(struct psp2sgx_device *sgx, const struct psp2sgx_step *s,
+		     u32 seen[3])
+{
+	static const u32 event_views[] = {
+		SGX_EVENT_STATUS, SGX_MASTER_EVENT_STATUS,
+		SGX_CORE_BANK(0) + SGX_EVENT_STATUS,
+	};
+	static const u32 status2_views[] = {
+		SGX_EVENT_STATUS2, SGX_CORE_BANK(0) + SGX_EVENT_STATUS2,
+	};
+	const u32 *view = &s->reg;
+	unsigned int n = 1, i;
+
+	if (s->reg == SGX_EVENT_STATUS || s->reg == SGX_MASTER_EVENT_STATUS) {
+		view = event_views;
+		n = ARRAY_SIZE(event_views);
+	} else if (s->reg == SGX_EVENT_STATUS2) {
+		view = status2_views;
+		n = ARRAY_SIZE(status2_views);
+	}
+	for (i = 0; i < n; i++) {
+		seen[i] = sgx_read(sgx, view[i]);
+		if ((seen[i] & s->mask) == s->value)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Poll from the CPU.  A TA took about 140 us on the DevKit and a 3D pass
+ * about 1.4 ms (the wait statistics), so the first polls spin and
+ * the rest sleep.
+ */
+static int host_wait(struct psp2sgx_device *sgx, const struct psp2sgx_step *s,
+		     u32 seen[3], s64 *us)
+{
+	ktime_t t0 = ktime_get();
+	unsigned int spins = 0;
+
+	for (;;) {
+		bool met = wait_met(sgx, s, seen);
+
+		*us = ktime_us_delta(ktime_get(), t0);
+		if (met)
+			return 0;
+		if (*us > PSP2SGX_HOST_WAIT_US)
+			return -ETIMEDOUT;
+		if (spins++ < 64)
+			udelay(2);
+		else
+			usleep_range(10, 25);
+	}
+}
+
+static void account_host_wait(struct psp2sgx_device *sgx, u8 what, s64 us)
+{
+	typeof(sgx->host_polls[0]) *p;
+
+	if (what == WAIT_OTHER)
+		return;
+	p = &sgx->host_polls[what == WAIT_3D];
+	p->jobs++;
+	p->sum_us += us;
+	p->max_us = max_t(u32, p->max_us, us);
+}
+
+/* A host wait gave up: report, and fail the job; hw_lock held. */
+static void wait_failed(struct psp2sgx_device *sgx, struct psp2sgx_job *job,
+			const struct psp2sgx_step *s, const u32 seen[3], s64 us)
+{
+	u32 late[3];
+
+	dev_warn(sgx->dev, "job %u: wait for %#x & %#x == %#x gave up after %lld us: read %#x %#x %#x, cores EVENT_STATUS %#x %#x %#x %#x, clocks %08x %08x %08x %08x\n",
+		 job->seqno, s->reg, s->mask, s->value, us, seen[0], seen[1], seen[2],
+		 sgx_read(sgx, SGX_CORE_BANK(0) + SGX_EVENT_STATUS),
+		 sgx_read(sgx, SGX_CORE_BANK(1) + SGX_EVENT_STATUS),
+		 sgx_read(sgx, SGX_CORE_BANK(2) + SGX_EVENT_STATUS),
+		 sgx_read(sgx, SGX_CORE_BANK(3) + SGX_EVENT_STATUS),
+		 sgx_read(sgx, SGX_CORE_BANK(0) + SGX_CLKGATESTATUS),
+		 sgx_read(sgx, SGX_CORE_BANK(1) + SGX_CLKGATESTATUS),
+		 sgx_read(sgx, SGX_CORE_BANK(2) + SGX_CLKGATESTATUS),
+		 sgx_read(sgx, SGX_CORE_BANK(3) + SGX_CLKGATESTATUS));
+	report_polls(sgx, "before the failure");
+	if (!sgx->regs_dumped)
+		report_fault_bos(sgx, job);
+	psp2sgx_diag_dump(sgx, "failed wait");
+	psp2sgx_diag_regdump(sgx, "failed wait");
+	/* did it come after all: a slow render, not a hang */
+	dev_warn(sgx->dev, "job %u: after the dump the wait is %s\n", job->seqno,
+		 wait_met(sgx, s, late) ? "met" : "still not met");
+	sgx->needs_reset = true;
+	finish_job(sgx, job, -EIO);
+}
+
+/*
+ * Run the job's steps from job->step: host waits here, up to the next
+ * code, which the microkernel runs; its interrupt continues from there.
+ * hw_lock held.
+ */
+static void advance(struct psp2sgx_device *sgx, struct psp2sgx_job *job)
+{
+	while (job->step < job->nr_steps) {
+		const struct psp2sgx_step *s = &job->steps[job->step++];
+		u32 seen[3] = {};
+		s64 us;
+
+		if (READ_ONCE(sgx->current_job) != job)
+			return;		/* a timeout took it */
+		if (s->kind == STEP_CODE) {
+			kick_code(sgx, job, s, s == job->steps);
+			return;
+		}
+		if (host_wait(sgx, s, seen, &us)) {
+			wait_failed(sgx, job, s, seen, us);
+			return;
+		}
+		account_host_wait(sgx, s->what, us);
+	}
+	finish_job(sgx, job, 0);
+}
+
+static void psp2sgx_step_work(struct work_struct *work)
+{
+	struct psp2sgx_device *sgx = container_of(work, struct psp2sgx_device,
+						  step_work);
+	struct psp2sgx_job *job;
+	unsigned long flags;
+
+	mutex_lock(&sgx->hw_lock);
+	spin_lock_irqsave(&sgx->fence_lock, flags);
+	job = sgx->current_job;
+	spin_unlock_irqrestore(&sgx->fence_lock, flags);
+	if (job)
+		advance(sgx, job);
+	mutex_unlock(&sgx->hw_lock);
+}
 
 static struct dma_fence *psp2sgx_run_job(struct drm_sched_job *sched_job)
 {
 	struct psp2sgx_job *job = to_job(sched_job);
 	struct psp2sgx_device *sgx = job->sgx;
-	u32 *hc = psp2sgx_hostctl(sgx);
 	struct dma_fence *fence;
 	unsigned long flags;
-	unsigned int i;
 
 	if (unlikely(sched_job->s_fence->finished.error))
 		return NULL;
@@ -399,33 +722,11 @@ static struct dma_fence *psp2sgx_run_job(struct drm_sched_job *sched_job)
 	job->seqno = lower_32_bits(sgx->emit_seqno);
 	dma_fence_put(job->done);
 	job->done = dma_fence_get(fence);
+	job->step = 0;
 	sgx->current_job = job;
 	spin_unlock_irqrestore(&sgx->fence_lock, flags);
 
-	/*
-	 * Empty the SLC before touching the host control block.  The
-	 * microkernel runs on every event, also after the job's completion
-	 * interrupt, and its run count store leaves the block's line dirty in
-	 * the SLC with the old state.  A flush after the writes below wrote
-	 * that line back over them: on the DevKit job 2 read "idle, job 1"
-	 * and timed out (2026-09-24).
-	 */
-	if (psp2sgx_hw_slc_flush(sgx))
-		dev_warn_ratelimited(sgx->dev, "SLC flush timed out\n");
-	psp2sgx_put_code((u8 *)sgx->kregion + SGX_MK_JOB_CODE, job->code,
-			 job->code_len);
-	WRITE_ONCE(hc[SGX_HC_JOB_SEQNO], job->seqno);
-	WRITE_ONCE(hc[SGX_HC_ERROR], 0);
-	for (i = SGX_HC_DIAG_TA; i < SGX_HC_WORDS; i++)
-		WRITE_ONCE(hc[i], 0);
-	wmb();
-	WRITE_ONCE(hc[SGX_HC_STATE], SGX_MK_PENDING);
-	psp2sgx_hw_wait_cores_idle(sgx, job->seqno);
-	psp2sgx_hw_set_vm(sgx, job->vm);
-	/* the GPU must see the code, the job and the tables, not stale lines */
-	if (psp2sgx_hw_slc_flush(sgx) || psp2sgx_hw_invalidate_caches(sgx))
-		dev_warn_ratelimited(sgx->dev, "cache maintenance timed out\n");
-	psp2sgx_hw_kick(sgx);
+	advance(sgx, job);	/* the first step is code: kicks and returns */
 	mutex_unlock(&sgx->hw_lock);
 	return fence;
 }
@@ -461,7 +762,15 @@ static void report_polls(struct psp2sgx_device *sgx, const char *why)
 
 	for (k = 0; k < 2; k++) {
 		typeof(sgx->polls[0]) *p = &sgx->polls[k];
+		typeof(sgx->host_polls[0]) *h = &sgx->host_polls[k];
 
+		if (host_waits) {
+			dev_info(sgx->dev, "%s: %s waits %u, host polled mean %llu us max %u us of %u\n",
+				 why, k ? "3D" : "TA", h->jobs,
+				 h->jobs ? div_u64(h->sum_us, h->jobs) : 0, h->max_us,
+				 PSP2SGX_HOST_WAIT_US);
+			continue;
+		}
 		dev_info(sgx->dev, "%s: %s waits %u, polls mean %llu max %u of %u, over 1/64 %u 1/16 %u 1/4 %u 1/2 %u\n",
 			 why, k ? "3D" : "TA", p->jobs,
 			 p->jobs ? div_u64(p->sum, p->jobs) : 0, p->max,
@@ -469,9 +778,9 @@ static void report_polls(struct psp2sgx_device *sgx, const char *why)
 			 p->over[2], p->over[3]);
 	}
 	memset(sgx->polls, 0, sizeof(sgx->polls));
+	memset(sgx->host_polls, 0, sizeof(sgx->host_polls));
 }
 
-/* The SW_EVENT interrupt, from the threaded handler. */
 /*
  * Which of the job's buffers holds each core's MMU fault address.  On the
  * DevKit cores 2 and 3 faulted at 0x01010000 while its PTE was valid.
@@ -524,7 +833,13 @@ void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 
 	spin_lock_irqsave(&sgx->fence_lock, flags);
 	job = sgx->current_job;
-	if (job && (s32)(done - job->seqno) >= 0) {
+	if (job && (s32)(done - READ_ONCE(job->kick)) >= 0) {
+		/* host_waits: the job goes on after this run */
+		if (!error && job->step < job->nr_steps) {
+			queue_work(sgx->step_wq, &sgx->step_work);
+			spin_unlock_irqrestore(&sgx->fence_lock, flags);
+			return;
+		}
 		account_polls(sgx, hc);
 		if (error) {
 			dev_warn_ratelimited(sgx->dev, "job %u: microkernel error %#x, cores 1-3 EVENT_STATUS %#x %#x %#x\n",
@@ -551,7 +866,7 @@ void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 		}
 		sgx->current_job = NULL;
 		dma_fence_signal_locked(job->done);
-		if (sgx->polls[1].jobs >= 2000)
+		if (sgx->polls[1].jobs >= 2000 || sgx->host_polls[1].jobs >= 2000)
 			report_polls(sgx, "wait statistics");
 	}
 	spin_unlock_irqrestore(&sgx->fence_lock, flags);
@@ -576,8 +891,15 @@ static enum drm_gpu_sched_stat psp2sgx_timedout_job(struct drm_sched_job *sched_
 	if (job->done && dma_fence_is_signaled(job->done))
 		return DRM_GPU_SCHED_STAT_NO_HANG;
 
-	dev_err(sgx->dev, "job %u timed out: state %u done %u error %#x runs %u, EVENT_STATUS %#x\n",
-		job->seqno, READ_ONCE(hc[SGX_HC_STATE]), READ_ONCE(hc[SGX_HC_DONE_SEQNO]),
+	/* the job is off the hardware from here; no step work continues it */
+	spin_lock_irqsave(&sgx->fence_lock, flags);
+	sgx->current_job = NULL;
+	spin_unlock_irqrestore(&sgx->fence_lock, flags);
+	cancel_work_sync(&sgx->step_work);
+
+	dev_err(sgx->dev, "job %u timed out at step %u of %u: state %u done %u error %#x runs %u, EVENT_STATUS %#x\n",
+		job->seqno, job->step, job->nr_steps,
+		READ_ONCE(hc[SGX_HC_STATE]), READ_ONCE(hc[SGX_HC_DONE_SEQNO]),
 		READ_ONCE(hc[SGX_HC_ERROR]), READ_ONCE(hc[SGX_HC_RUNS]),
 		sgx_read(sgx, SGX_EVENT_STATUS));
 	if (sgx->timeouts_dumped < 2) {
@@ -589,10 +911,6 @@ static enum drm_gpu_sched_stat psp2sgx_timedout_job(struct drm_sched_job *sched_
 
 	drm_sched_stop(&sgx->sched, sched_job);
 	drm_sched_increase_karma(sched_job);
-
-	spin_lock_irqsave(&sgx->fence_lock, flags);
-	sgx->current_job = NULL;
-	spin_unlock_irqrestore(&sgx->fence_lock, flags);
 
 	mutex_lock(&sgx->hw_lock);
 	psp2sgx_hw_reset(sgx);
@@ -622,6 +940,7 @@ static void psp2sgx_job_free(struct psp2sgx_job *job)
 	psp2sgx_job_put_bos(job);
 	dma_fence_put(job->done);
 	kvfree(job->code);
+	kvfree(job->steps);
 	psp2sgx_vm_put(job->vm);
 	kfree(job);
 }
@@ -652,14 +971,24 @@ int psp2sgx_sched_init(struct psp2sgx_device *sgx)
 		.dev = sgx->dev,
 	};
 
+	int err;
+
 	sgx->fence_context = dma_fence_context_alloc(1);
 	spin_lock_init(&sgx->fence_lock);
-	return drm_sched_init(&sgx->sched, &args);
+	INIT_WORK(&sgx->step_work, psp2sgx_step_work);
+	sgx->step_wq = alloc_ordered_workqueue("psp2sgx-steps", WQ_HIGHPRI | WQ_MEM_RECLAIM);
+	if (!sgx->step_wq)
+		return -ENOMEM;
+	err = drm_sched_init(&sgx->sched, &args);
+	if (err)
+		destroy_workqueue(sgx->step_wq);
+	return err;
 }
 
 void psp2sgx_sched_fini(struct psp2sgx_device *sgx)
 {
 	drm_sched_fini(&sgx->sched);
+	destroy_workqueue(sgx->step_wq);
 }
 
 /* ------------------------------------------------------------------ submit */

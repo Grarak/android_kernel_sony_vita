@@ -44,6 +44,8 @@
  * count is a full 32-bit register (i32mad2 multiplies 32 x 16).
  */
 #define PSP2SGX_WAIT_MAX_POLLS		0x00050000u
+/* The same budget for a wait the host polls (host_waits) */
+#define PSP2SGX_HOST_WAIT_US		275000u
 
 struct psp2sgx_vm;
 struct psp2sgx_job;
@@ -92,6 +94,10 @@ struct psp2sgx_device {
 	spinlock_t fence_lock;
 	/* the job on the hardware, if any; protected by fence_lock */
 	struct psp2sgx_job *current_job;
+	u32 kick_seqno;			/* microkernel runs posted (hw_lock) */
+	/* the current job's next steps after a microkernel run (host_waits) */
+	struct workqueue_struct *step_wq;
+	struct work_struct step_work;
 	bool events_reported;		/* the EVENT_STATUS views logged once */
 	unsigned int timeouts_dumped;	/* diag dumps of job timeouts so far */
 	bool regs_dumped;		/* the full register dump, once */
@@ -103,6 +109,11 @@ struct psp2sgx_device {
 		u64 sum;
 		u32 over[4];		/* above 1/64, 1/16, 1/4 and 1/2 of the budget */
 	} polls[2];
+	/* the same for the host's waits (host_waits), in microseconds */
+	struct {
+		u32 jobs, max_us;
+		u64 sum_us;
+	} host_polls[2];
 	struct delayed_work diag_work;	/* the self-test result again, later */
 	char selftest[64];		/* the microkernel self-test's result */
 
