@@ -163,19 +163,51 @@ int psp2sgx_hw_wait_cores_idle(struct psp2sgx_device *sgx, u32 seqno)
  * stores are invisible to the CPU without it, and a program's last store is
  * no fence: the host flushes after it sees the completion interrupt.
  */
+/*
+ * One SLC request, acknowledged in MASTER_SLC_EVENT_STATUS.  The bit is
+ * cleared before the request as well: one left set would end the wait at
+ * once, with the request still going.  slc_lock keeps the IRQ thread's
+ * write-back and the job path's flushes from taking each other's bits.
+ */
+static int slc_request(struct psp2sgx_device *sgx, u32 ctrl, u32 value, u32 event)
+{
+	int err;
+
+	spin_lock(&sgx->slc_lock);
+	sgx_write(sgx, SGX_MASTER_SLC_EVENT_CLEAR, event);
+	sgx_write(sgx, ctrl, value);
+	err = poll_bits(sgx, SGX_MASTER_SLC_EVENT_STATUS, event, NULL);
+	sgx_write(sgx, SGX_MASTER_SLC_EVENT_CLEAR, event);
+	spin_unlock(&sgx->slc_lock);
+	return err;
+}
+
+/*
+ * Write the SLC's dirty lines back and drop every line.  Only while no
+ * render or microkernel run of ours is going: an invalidate drops the
+ * stores of a program that is running (seen on the DevKit).
+ */
 int psp2sgx_hw_slc_flush(struct psp2sgx_device *sgx)
 {
 	int err;
 
-	sgx_write(sgx, SGX_MASTER_SLC_CTRL_FLUSH, SGX_SLC_FLUSH_ALL);
-	err = poll_bits(sgx, SGX_MASTER_SLC_EVENT_STATUS, SGX_SLC_EVENT_FLUSH, NULL);
-	sgx_write(sgx, SGX_MASTER_SLC_EVENT_CLEAR, SGX_SLC_EVENT_FLUSH);
+	err = slc_request(sgx, SGX_MASTER_SLC_CTRL_FLUSH, SGX_SLC_FLUSH_ALL,
+			  SGX_SLC_EVENT_FLUSH);
 	if (err)
 		return err;
-	sgx_write(sgx, SGX_MASTER_SLC_CTRL_INVAL, SGX_SLC_INVAL_ALL);
-	err = poll_bits(sgx, SGX_MASTER_SLC_EVENT_STATUS, SGX_SLC_EVENT_INVAL, NULL);
-	sgx_write(sgx, SGX_MASTER_SLC_EVENT_CLEAR, SGX_SLC_EVENT_INVAL);
-	return err;
+	return slc_request(sgx, SGX_MASTER_SLC_CTRL_INVAL, SGX_SLC_INVAL_ALL,
+			   SGX_SLC_EVENT_INVAL);
+}
+
+/*
+ * Write the dirty lines back and keep them: for the host to read what the
+ * GPU stored while a TA or 3D pass may still be running, as after a run
+ * that started one.
+ */
+int psp2sgx_hw_slc_writeback(struct psp2sgx_device *sgx)
+{
+	return slc_request(sgx, SGX_MASTER_SLC_CTRL_FLUSH, SGX_SLC_FLUSH_ALL,
+			   SGX_SLC_EVENT_FLUSH);
 }
 
 /*

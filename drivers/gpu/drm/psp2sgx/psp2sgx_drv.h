@@ -95,6 +95,11 @@ struct psp2sgx_device {
 	/* the job on the hardware, if any; protected by fence_lock */
 	struct psp2sgx_job *current_job;
 	u32 kick_seqno;			/* microkernel runs posted (hw_lock) */
+	/* SW_EVENT interrupts, and the DONE_SEQNO the last one read */
+	u32 sw_events, irq_done;
+	/* runs whose DONE_SEQNO came after their interrupt, or was seen only at the timeout */
+	unsigned int late_done, missed_done;
+	spinlock_t slc_lock;		/* one SLC flush or invalidate at a time */
 	/* the current job's next steps after a microkernel run (host_waits) */
 	struct workqueue_struct *step_wq;
 	struct work_struct step_work;
@@ -186,6 +191,7 @@ int psp2sgx_hw_init(struct psp2sgx_device *sgx);
 unsigned int psp2sgx_hw_cores(void);
 int psp2sgx_hw_reset(struct psp2sgx_device *sgx);
 int psp2sgx_hw_slc_flush(struct psp2sgx_device *sgx);
+int psp2sgx_hw_slc_writeback(struct psp2sgx_device *sgx);
 int psp2sgx_hw_wait_cores_idle(struct psp2sgx_device *sgx, u32 seqno);
 int psp2sgx_hw_invalidate_caches(struct psp2sgx_device *sgx);
 void psp2sgx_hw_set_vm(struct psp2sgx_device *sgx, struct psp2sgx_vm *vm);

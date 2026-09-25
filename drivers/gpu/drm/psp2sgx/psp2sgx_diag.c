@@ -48,7 +48,8 @@ void psp2sgx_diag_dump(struct psp2sgx_device *sgx, const char *why)
 {
 	u32 *hc = psp2sgx_hostctl(sgx);
 	u32 c0 = SGX_CORE_BANK(0);
-	int flush = psp2sgx_hw_slc_flush(sgx);
+	/* the GPU may still be running: write back, drop nothing */
+	int flush = psp2sgx_hw_slc_writeback(sgx);
 	unsigned int n;
 
 	rmb();

@@ -184,6 +184,7 @@ static int psp2sgx_probe(struct platform_device *pdev)
 		return PTR_ERR(sgx);
 	sgx->dev = dev;
 	mutex_init(&sgx->hw_lock);
+	spin_lock_init(&sgx->slc_lock);
 	psp2sgx_diag_init(sgx);
 	platform_set_drvdata(pdev, sgx);
 

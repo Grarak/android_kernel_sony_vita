@@ -72,6 +72,7 @@ struct psp2sgx_job {
 	u32 nr_steps, max_steps;
 	u32 step;			/* the next step to run (hw_lock) */
 	u32 kick;			/* kick_seqno of its last microkernel run */
+	u32 rescues;			/* timeouts that found its run done and went on */
 	u32 seqno;
 	struct dma_fence *done;		/* the hardware fence */
 };
@@ -668,6 +669,22 @@ static void advance(struct psp2sgx_device *sgx, struct psp2sgx_job *job)
 	finish_job(sgx, job, 0);
 }
 
+/* Whether the job's last microkernel run is done, as the host can see it. */
+static bool run_done(struct psp2sgx_device *sgx, struct psp2sgx_job *job)
+{
+	u32 *hc = psp2sgx_hostctl(sgx);
+
+	if (psp2sgx_hw_slc_writeback(sgx))
+		dev_warn_ratelimited(sgx->dev, "SLC write-back timed out\n");
+	rmb();
+	return (s32)(READ_ONCE(hc[SGX_HC_DONE_SEQNO]) - READ_ONCE(job->kick)) >= 0;
+}
+
+/*
+ * Go on with the current job after its run.  Queued by the run's interrupt,
+ * and by a timeout that finds the run done without one; the second must
+ * not start the steps after a run that is still going.
+ */
 static void psp2sgx_step_work(struct work_struct *work)
 {
 	struct psp2sgx_device *sgx = container_of(work, struct psp2sgx_device,
@@ -679,7 +696,7 @@ static void psp2sgx_step_work(struct work_struct *work)
 	spin_lock_irqsave(&sgx->fence_lock, flags);
 	job = sgx->current_job;
 	spin_unlock_irqrestore(&sgx->fence_lock, flags);
-	if (job)
+	if (job && run_done(sgx, job))
 		advance(sgx, job);
 	mutex_unlock(&sgx->hw_lock);
 }
@@ -816,17 +833,40 @@ static void report_fault_bos(struct psp2sgx_device *sgx, struct psp2sgx_job *job
 void psp2sgx_job_irq(struct psp2sgx_device *sgx)
 {
 	u32 *hc = psp2sgx_hostctl(sgx);
+	u32 kick = READ_ONCE(sgx->kick_seqno);
 	struct psp2sgx_job *job;
 	unsigned long flags;
+	unsigned int us;
 	u32 done, error;
 	bool dump = false;
 
-	/* the microkernel's stores sit in the SLC until flushed */
-	if (psp2sgx_hw_slc_flush(sgx))
-		dev_warn_ratelimited(sgx->dev, "SLC flush timed out\n");
-	rmb();
-	done = READ_ONCE(hc[SGX_HC_DONE_SEQNO]);
+	/*
+	 * The microkernel's stores sit in the SLC until written back.  Only
+	 * written back, not dropped: the run may have started a TA or a 3D
+	 * pass that is still storing, and an invalidate would lose its data.
+	 */
+	for (us = 0;; us += 20) {
+		if (psp2sgx_hw_slc_writeback(sgx))
+			dev_warn_ratelimited(sgx->dev, "SLC write-back timed out\n");
+		rmb();
+		done = READ_ONCE(hc[SGX_HC_DONE_SEQNO]);
+		if (done == kick || us >= 1000)
+			break;
+		udelay(20);
+	}
 	error = READ_ONCE(hc[SGX_HC_ERROR]);
+	sgx->sw_events++;
+	sgx->irq_done = done;
+	/*
+	 * The run raised SW_EVENT only after its DONE_SEQNO store, so the host
+	 * should read it at once.  On the DevKit a run finished, DONE_SEQNO
+	 * read equal to its kick at the timeout 2 s later, and the job had not
+	 * gone on.
+	 */
+	if (us)
+		dev_warn_ratelimited(sgx->dev, "run %u: DONE_SEQNO %s %u us after its interrupt (%u so far)\n",
+				     kick, done == kick ? "arrived" : "still behind, read",
+				     us, ++sgx->late_done);
 
 	spin_lock_irqsave(&sgx->fence_lock, flags);
 	job = sgx->current_job;
@@ -888,18 +928,35 @@ static enum drm_gpu_sched_stat psp2sgx_timedout_job(struct drm_sched_job *sched_
 	if (job->done && dma_fence_is_signaled(job->done))
 		return DRM_GPU_SCHED_STAT_NO_HANG;
 
+	/*
+	 * Its last run finished but nothing took the job on: go on with it
+	 * (the step work checks the run again under hw_lock).  A job that is
+	 * in a slow host wait gets here too, and loses nothing.  Three times
+	 * at most, so a job that never gets anywhere still fails.
+	 */
+	if (READ_ONCE(sgx->current_job) == job && job->rescues < 3 &&
+	    run_done(sgx, job) && !READ_ONCE(hc[SGX_HC_ERROR])) {
+		job->rescues++;
+		dev_warn(sgx->dev, "job %u at step %u of %u: run %u is done without its completion taken (SW_EVENTs %u, the last read DONE_SEQNO %u, %u such runs); going on\n",
+			 job->seqno, job->step, job->nr_steps, READ_ONCE(job->kick),
+			 sgx->sw_events, sgx->irq_done, ++sgx->missed_done);
+		queue_work(sgx->step_wq, &sgx->step_work);
+		return DRM_GPU_SCHED_STAT_NO_HANG;
+	}
+
 	/* the job is off the hardware from here; no step work continues it */
 	spin_lock_irqsave(&sgx->fence_lock, flags);
 	sgx->current_job = NULL;
 	spin_unlock_irqrestore(&sgx->fence_lock, flags);
 	cancel_work_sync(&sgx->step_work);
 
-	dev_err(sgx->dev, "job %u timed out at step %u of %u: kick %u posted %u, state %u claimed %u done %u error %#x runs %u, EVENT_STATUS %#x\n",
+	dev_err(sgx->dev, "job %u timed out at step %u of %u: kick %u posted %u, state %u claimed %u done %u error %#x runs %u, EVENT_STATUS %#x, SW_EVENTs %u last read done %u\n",
 		job->seqno, job->step, job->nr_steps, READ_ONCE(job->kick),
 		READ_ONCE(psp2sgx_hostpost(sgx)[SGX_HP_POSTED]),
 		READ_ONCE(hc[SGX_HC_STATE]), READ_ONCE(hc[SGX_HC_CLAIMED]),
 		READ_ONCE(hc[SGX_HC_DONE_SEQNO]), READ_ONCE(hc[SGX_HC_ERROR]),
-		READ_ONCE(hc[SGX_HC_RUNS]), sgx_read(sgx, SGX_EVENT_STATUS));
+		READ_ONCE(hc[SGX_HC_RUNS]), sgx_read(sgx, SGX_EVENT_STATUS),
+		sgx->sw_events, sgx->irq_done);
 	if (sgx->timeouts_dumped < 2) {
 		sgx->timeouts_dumped++;
 		mutex_lock(&sgx->hw_lock);
