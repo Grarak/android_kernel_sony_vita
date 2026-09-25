@@ -52,3 +52,12 @@
 		no-map;
 	};
 };
+
+/*
+ * The mini-USB port, bus 1. Android's USB function stays on the
+ * multi-connector (sys.usb.controller e40d0000.usb); this one is a second
+ * gadget controller for configfs. Not verified on hardware.
+ */
+&udc1 {
+	status = "okay";
+};

@@ -49,3 +49,13 @@
 		no-map;
 	};
 };
+
+/*
+ * udcd reads this model's VBUS from GPIO0 port 5 (low while a cable supplies
+ * it) as well as Pervasive2; unlike the PCH-1000 it has no port 24 switch
+ * (hardware info 0x80xxxx/0x82xxxx, udcd.skprx 0x810082a0, 0x81006554). Not
+ * verified on hardware.
+ */
+&udc2 {
+	vbus-gpios = <&gpio0 5 GPIO_ACTIVE_LOW>;
+};

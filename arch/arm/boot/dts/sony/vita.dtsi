@@ -666,13 +666,36 @@
 		};
 
 		/*
+		 * udcd's bus 1, the same controller as bus 2 below: IDs 151/152
+		 * controller/DMA, 165 VBUS, Pervasive2 +0xF50 bit 1
+		 * [RE udcd.skprx 3.65]. Every Kermit has it; the DevKit
+		 * wires it to the mini-USB port its DECI debugger uses.
+		 */
+		udc1: usb@e40c0000 {
+			compatible = "vita,udc";
+			reg = <0xe40c0000 0x1000>,
+			      <0xe3100000 0x1000>,
+			      <0xe3101000 0x1000>,
+			      <0xe3102000 0x1000>,
+			      <0xe3110000 0x1000>;
+			reg-names = "udc", "misc", "reset", "gate", "pervasive2";
+			interrupts = <GIC_SPI 119 IRQ_TYPE_LEVEL_HIGH>,	/* ID 151 */
+				     <GIC_SPI 120 IRQ_TYPE_LEVEL_HIGH>,	/* ID 152 */
+				     <GIC_SPI 133 IRQ_TYPE_LEVEL_HIGH>;	/* ID 165 */
+			interrupt-names = "udc", "dma", "vbus";
+			vita,usb-bus = <1>;
+			status = "disabled";
+		};
+
+		/*
 		 * USB device controller of the multi-connector (micro-USB on the
 		 * PCH-2000), udcd's bus 2: Toshiba UDC2 core at +0x200, Kermit DMA
 		 * blocks at +0x400 [RE udcd.skprx 3.65]. Its PHY mode, power,
 		 * reset and gate words are in Pervasive; PHY ready and VBUS in
 		 * Pervasive2. IDs 155/156 controller/DMA, 171 VBUS
 		 * [udcd.skprx 0x810082a0]. VBUS comes from Pervasive2 +0xF50 bit 2,
-		 * on the PCH-1000 together with GPIO0 port 5 (vita1000.dts).
+		 * on the PCH-1000 and PCH-2000 together with GPIO0 port 5
+		 * (vita1000.dts, vita2000.dts).
 		 */
 		udc2: usb@e40d0000 {
 			compatible = "vita,udc";

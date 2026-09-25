@@ -78,7 +78,7 @@
 #define DMA_ST_8		BIT(3)
 #define DMA_ST_10		BIT(4)
 #define DMA_ST_20		BIT(5)
-#define DMA_ST_ERROR		BIT(6)
+#define DMA_ST_STOP		BIT(6)	/* a busy channel stopped (inferred) */
 #define DMA_ST_80		BIT(7)
 #define DMA_ST_ABORT		BIT(8)
 #define DMA_ST_20000		BIT(17)
@@ -280,10 +280,17 @@ static inline void dma_write(struct vita_udc_ep *ep, u32 reg, u32 val)
 	writel(val, ep->udc->regs + DMA_BLOCK(ep->num) + reg);
 }
 
+/* Misc+0x17C and Pervasive2 +0xF58 hold fields of both buses. */
+static DEFINE_SPINLOCK(vita_udc_perv_lock);
+
 static void perv_update(void __iomem *reg, u32 clear, u32 set)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&vita_udc_perv_lock, flags);
 	writel((readl(reg) & ~clear) | set, reg);
 	dsb(sy);
+	spin_unlock_irqrestore(&vita_udc_perv_lock, flags);
 }
 
 static void udc_int_ack(struct vita_udc *udc, u32 bits)
@@ -371,6 +378,17 @@ static int vita_udc_wait_phy(struct vita_udc *udc)
 	if (ret)
 		dev_err(udc->dev, "USB PHY %u did not become ready\n", udc->bus);
 	return ret;
+}
+
+/* The PHY after a resume, udcd's ten short polls (0x81008814): about 1 ms. */
+static void vita_udc_wait_phy_atomic(struct vita_udc *udc)
+{
+	u32 val;
+
+	if (readl_poll_timeout_atomic(udc->perv2 + PERV2_PHY_READY, val,
+				      val & BIT(udc->bus), 10, 1000))
+		dev_warn(udc->dev, "USB PHY %u not ready after resume\n", udc->bus);
+	writel(BIT(udc->bus), udc->perv2 + PERV2_PHY_IRQ);
 }
 
 /*
@@ -501,29 +519,73 @@ static void vita_udc_done(struct vita_udc_ep *ep, struct vita_udc_req *req,
 }
 
 /*
- * Cancel an endpoint's DMA, udcd 0x81006260: a busy channel only has its run
- * bit taken away; an idle one is cancelled and the cancel acknowledged.
+ * Stop an endpoint's DMA; returns the OUT byte count it had reached.  udcd
+ * (0x81006260) only takes the run bit away from a busy channel and leaves
+ * the request in flight until the channel reports the stop, DMA status bit
+ * 6 or 8, whose interrupt stops it again, now idle, and ends the request
+ * with an error (0x81006f90).  Here the stop is awaited in place, with
+ * udcd's 1 ms bound, so a late stop interrupt cannot end the next request
+ * instead.  The idle channel is then cancelled, the cancel awaited, and its
+ * status acknowledged.
  */
-static void vita_udc_dma_abort(struct vita_udc_ep *ep)
+static u32 vita_udc_dma_stop(struct vita_udc_ep *ep)
 {
 	struct vita_udc *udc = ep->udc;
-	u32 val;
+	void __iomem *dma = udc->regs + DMA_BLOCK(ep->num);
+	u32 val, actual;
 
-	if (dma_read(ep, DMA_BUSY) & 1) {
-		dma_write(ep, DMA_CONTROL, dma_read(ep, DMA_CONTROL) & ~1);
-	} else {
-		dma_write(ep, DMA_CONTROL, DMA_CONTROL_CANCEL);
-		readl_poll_timeout_atomic(udc->regs + DMA_BLOCK(ep->num) +
-					  DMA_CONTROL, val,
-					  val == DMA_CONTROL_CANCEL ||
-					  (udc_read(udc, BR_STATE) & BR_STATE_LINK),
-					  1, 1000);
-		dma_write(ep, DMA_CONTROL, 0);
+	if (readl(dma + DMA_BUSY) & 1) {
+		writel(readl(dma + DMA_CONTROL) & ~DMA_CONTROL_RUN,
+		       dma + DMA_CONTROL);
+		if (readl_poll_timeout_atomic(dma + DMA_STATUS, val,
+					      (val & (DMA_ST_STOP | DMA_ST_ABORT)) ||
+					      !(readl(dma + DMA_BUSY) & 1) ||
+					      (udc_read(udc, BR_STATE) & BR_STATE_LINK),
+					      1, 1000))
+			dev_warn_once(udc->dev, "%s: DMA stop not reported within 1 ms\n",
+				      ep->name);
 	}
-	if (udc_read(udc, BR_STATE) & BR_STATE_FIFO_CLEAR)
-		udc_cmd(udc, ep->num, CMD_EP_FIFO_CLEAR);
-	dma_write(ep, DMA_STATUS, dma_read(ep, DMA_STATUS));
+	actual = readl(dma + DMA_ACTUAL);
+	writel(DMA_CONTROL_CANCEL, dma + DMA_CONTROL);
+	readl_poll_timeout_atomic(dma + DMA_CONTROL, val,
+				  val == DMA_CONTROL_CANCEL ||
+				  (udc_read(udc, BR_STATE) & BR_STATE_LINK),
+				  1, 1000);
+	writel(0, dma + DMA_CONTROL);
+	writel(readl(dma + DMA_STATUS), dma + DMA_STATUS);
 	ep->busy = false;
+	return actual;
+}
+
+/* Abort, udcd 0x81006260: stop the DMA, clear the FIFO if the bridge lets it. */
+static u32 vita_udc_dma_abort(struct vita_udc_ep *ep)
+{
+	u32 actual = vita_udc_dma_stop(ep);
+
+	if (udc_read(ep->udc, BR_STATE) & BR_STATE_FIFO_CLEAR)
+		udc_cmd(ep->udc, ep->num, CMD_EP_FIFO_CLEAR);
+	return actual;
+}
+
+/*
+ * After a stop the head request could only start over from its first byte.
+ * An OUT transfer that had not received a byte loses nothing by that and
+ * stays queued; any other goes back with what is known of it, as udcd ends
+ * every stopped transfer with an error.
+ */
+static void vita_udc_give_back_stopped(struct vita_udc_ep *ep, u32 actual,
+				       int status)
+{
+	struct vita_udc_req *req;
+
+	if (list_empty(&ep->queue))
+		return;
+	req = list_first_entry(&ep->queue, struct vita_udc_req, queue);
+	actual = ep->in ? 0 : min(actual, req->req.length);
+	if (!ep->in && !actual)
+		return;
+	req->req.actual = actual;
+	vita_udc_done(ep, req, status);
 }
 
 static void vita_udc_nuke(struct vita_udc_ep *ep, int status)
@@ -561,7 +623,7 @@ static void vita_udc_dma_kick(struct vita_udc_ep *ep)
 	unsigned int len;
 
 	if (ep->busy || ep->halted || list_empty(&ep->queue) ||
-	    !ep->udc->running)
+	    !ep->udc->running || ep->udc->suspended)
 		return;
 	req = list_first_entry(&ep->queue, struct vita_udc_req, queue);
 	len = req->req.length;
@@ -747,6 +809,7 @@ static struct vita_udc_ep *vita_udc_find_ep(struct vita_udc *udc, u16 windex)
 	return ep;
 }
 
+static void vita_udc_ep_stall(struct vita_udc_ep *ep);
 static void vita_udc_ep_clear_halt(struct vita_udc_ep *ep);
 
 /* The standard requests this driver answers itself; true if it did. */
@@ -799,8 +862,7 @@ static bool vita_udc_std_request(struct vita_udc *udc)
 				return true;
 			}
 			if (ctrl->bRequest == USB_REQ_SET_FEATURE) {
-				ep->halted = true;
-				udc_cmd(udc, ep->num, CMD_EP_STALL);
+				vita_udc_ep_stall(ep);
 			} else if (!ep->wedged) {
 				vita_udc_ep_clear_halt(ep);
 			}
@@ -915,15 +977,32 @@ static void vita_udc_bus_reset_end(struct vita_udc *udc)
 	usb_gadget_set_state(&udc->gadget, USB_STATE_DEFAULT);
 }
 
+/*
+ * Suspend and resume, udcd 0x810076d0 on bridge bit 18.  udcd cancels every
+ * endpoint on suspend, and on resume, once the PHY is back, aborts each one
+ * with requests before its class drivers attach again.  Here the requests
+ * stay queued across the suspend, no transfer starts while it lasts, and a
+ * transfer the suspend stopped goes back only if it cannot start over.
+ */
 static void vita_udc_suspend_change(struct vita_udc *udc)
 {
 	struct usb_gadget_driver *driver = udc->driver;
+	struct vita_udc_ep *ep;
+	unsigned int n;
+	u32 actual;
 
 	if (udc_read(udc, BR_STATE) & BR_STATE_SUSPENDED) {
 		if (udc->suspended)
 			return;
 		udc->suspended = true;
 		udc_write(udc, BR_POWER, 2);
+		for (n = 1; n < VITA_UDC_EPS; n++) {
+			ep = &udc->ep[n];
+			if (!ep->busy)
+				continue;
+			actual = vita_udc_dma_abort(ep);
+			vita_udc_give_back_stopped(ep, actual, -ECONNRESET);
+		}
 		if (driver && driver->suspend) {
 			spin_unlock(&udc->lock);
 			driver->suspend(&udc->gadget);
@@ -931,12 +1010,20 @@ static void vita_udc_suspend_change(struct vita_udc *udc)
 		}
 	} else {
 		udc_write(udc, BR_POWER, 4);
+		vita_udc_wait_phy_atomic(udc);
 		/* One SOF confirms the bus is back (0x810076d0). */
 		udc->int_mask &= ~INT_M_SOF;
 		udc_int_ack(udc, INT_SOF);
 		if (!udc->suspended)
 			return;
 		udc->suspended = false;
+		for (n = 1; n < VITA_UDC_EPS; n++) {
+			ep = &udc->ep[n];
+			if (list_empty(&ep->queue))
+				continue;
+			vita_udc_dma_abort(ep);
+			vita_udc_dma_kick(ep);
+		}
 		if (driver && driver->resume) {
 			spin_unlock(&udc->lock);
 			driver->resume(&udc->gadget);
@@ -959,7 +1046,9 @@ static irqreturn_t vita_udc_irq(int irq, void *data)
 		spin_unlock(&udc->lock);
 		return IRQ_NONE;
 	}
-	if (!udc->running) {
+	/* udcd drops the controller's interrupts while VBUS is off (0x810076d0). */
+	if (!udc->running ||
+	    !(readl(udc->perv2 + PERV2_VBUS) & BIT(udc->bus))) {
 		udc_int_ack(udc, flags);
 		udc_write(udc, BR_INT_STATUS, status);
 		spin_unlock(&udc->lock);
@@ -1029,24 +1118,49 @@ static irqreturn_t vita_udc_irq(int irq, void *data)
 }
 
 /* One endpoint's DMA status, udcd 0x81006f90. */
-static void vita_udc_dma_ep_irq(struct vita_udc_ep *ep)
+static void vita_udc_dma_ep_irq(struct vita_udc_ep *ep, bool vbus)
 {
 	struct vita_udc_req *req = NULL;
 	u32 st = dma_read(ep, DMA_STATUS);
-	bool done = false;
+	bool busy = ep->busy, done = false, count = false;
 	int status = 0;
 
 	if (!list_empty(&ep->queue))
 		req = list_first_entry(&ep->queue, struct vita_udc_req, queue);
 
+	if (!vbus) {
+		/*
+		 * udcd ignores DMA interrupts while VBUS is off and cancels
+		 * everything when it handles the removal.  The line is level,
+		 * so the status is acknowledged here, and the transfer it
+		 * belongs to goes back now rather than staying in flight.
+		 */
+		dma_write(ep, DMA_STATUS, st);
+		if (req && busy) {
+			vita_udc_dma_abort(ep);
+			vita_udc_done(ep, req, -ESHUTDOWN);
+		}
+		return;
+	}
+
 	if (st & DMA_ST_DONE) {
 		dma_write(ep, DMA_STATUS, st & (DMA_ST_DONE | DMA_ST_4 | DMA_ST_8));
 		done = true;
-	} else if (st & (DMA_ST_4 | DMA_ST_8 | DMA_ST_10)) {
-		dma_write(ep, DMA_STATUS, st & (DMA_ST_4 | DMA_ST_8 | DMA_ST_10));
+	} else if (st & (DMA_ST_4 | DMA_ST_8)) {
+		dma_write(ep, DMA_STATUS, st & (DMA_ST_4 | DMA_ST_8));
 		done = !ep->in;
-	} else if (st & DMA_ST_ERROR) {
-		dma_write(ep, DMA_STATUS, DMA_ST_ERROR);
+	} else if (st & DMA_ST_10) {
+		/*
+		 * udcd ends an OUT transfer with bit 4 with its byte count and
+		 * error -4 (0x81005a1c).  What the bit reports is unknown; a
+		 * transfer larger than the buffer is a guess.
+		 */
+		dma_write(ep, DMA_STATUS, DMA_ST_10);
+		done = !ep->in;
+		status = -EOVERFLOW;
+		count = true;
+	} else if (st & DMA_ST_STOP) {
+		dma_write(ep, DMA_STATUS, DMA_ST_STOP);
 		vita_udc_dma_abort(ep);
 		done = true;
 		status = -EIO;
@@ -1064,10 +1178,11 @@ static void vita_udc_dma_ep_irq(struct vita_udc_ep *ep)
 		}
 	}
 
-	if (!done || !req || !ep->busy)
+	/* The abort above has cleared busy already. */
+	if (!done || !req || !busy)
 		return;
 	ep->busy = false;
-	if (!status)
+	if (!status || count)
 		req->req.actual = ep->in ? req->req.length :
 				  min(dma_read(ep, DMA_ACTUAL), req->req.length);
 	vita_udc_done(ep, req, status);
@@ -1079,6 +1194,7 @@ static irqreturn_t vita_udc_dma_irq(int irq, void *data)
 	struct vita_udc *udc = data;
 	unsigned int n;
 	u32 pending;
+	bool vbus;
 
 	spin_lock(&udc->lock);
 	pending = udc_read(udc, BR_DMA_INT) & GENMASK(VITA_UDC_EPS - 1, 1);
@@ -1086,9 +1202,10 @@ static irqreturn_t vita_udc_dma_irq(int irq, void *data)
 		spin_unlock(&udc->lock);
 		return IRQ_NONE;
 	}
+	vbus = udc->running && (readl(udc->perv2 + PERV2_VBUS) & BIT(udc->bus));
 	for (n = 1; n < VITA_UDC_EPS; n++)
 		if (pending & BIT(n))
-			vita_udc_dma_ep_irq(&udc->ep[n]);
+			vita_udc_dma_ep_irq(&udc->ep[n], vbus);
 	spin_unlock(&udc->lock);
 	return IRQ_HANDLED;
 }
@@ -1155,6 +1272,27 @@ static void vita_udc_ep_reset_state(struct vita_udc *udc)
 		udc->ep[n].busy = false;
 		udc->ep[n].ep.desc = NULL;
 	}
+}
+
+/*
+ * Stall a data endpoint, udcd 0x81006de0: stop its DMA, clear its FIFO
+ * (always, unlike an abort) and give EP_Stall.  udcd issues the stall of a
+ * busy channel from its stop interrupt; vita_udc_dma_stop has awaited that
+ * stop already.  The transfer the stop cut off goes back to the gadget
+ * unless it can start over once the halt is cleared.
+ */
+static void vita_udc_ep_stall(struct vita_udc_ep *ep)
+{
+	struct vita_udc *udc = ep->udc;
+	bool busy = ep->busy;
+	u32 actual;
+
+	ep->halted = true;
+	actual = vita_udc_dma_stop(ep);
+	udc_cmd(udc, ep->num, CMD_EP_FIFO_CLEAR);
+	udc_cmd(udc, ep->num, CMD_EP_STALL);
+	if (busy)
+		vita_udc_give_back_stopped(ep, actual, -ECONNRESET);
 }
 
 static void vita_udc_ep_clear_halt(struct vita_udc_ep *ep)
@@ -1307,6 +1445,7 @@ static int vita_udc_ep_dequeue(struct usb_ep *_ep, struct usb_request *_req)
 	struct vita_udc_req *req, *iter;
 	unsigned long flags;
 	bool head;
+	u32 actual;
 
 	spin_lock_irqsave(&udc->lock, flags);
 	req = NULL;
@@ -1323,9 +1462,8 @@ static int vita_udc_ep_dequeue(struct usb_ep *_ep, struct usb_request *_req)
 
 	head = list_is_first(&req->queue, &ep->queue);
 	if (head && ep->num && ep->busy) {
-		vita_udc_dma_abort(ep);
-		req->req.actual = ep->in ? 0 : min(dma_read(ep, DMA_ACTUAL),
-						   req->req.length);
+		actual = vita_udc_dma_abort(ep);
+		req->req.actual = ep->in ? 0 : min(actual, req->req.length);
 	}
 	vita_udc_done(ep, req, -ECONNRESET);
 	if (head && ep->num)
@@ -1353,10 +1491,7 @@ static int vita_udc_ep_set_halt_wedge(struct usb_ep *_ep, int value, bool wedge)
 		if (ep->in && !list_empty(&ep->queue)) {
 			ret = -EAGAIN;
 		} else {
-			if (ep->busy)
-				vita_udc_dma_abort(ep);
-			udc_cmd(udc, ep->num, CMD_EP_STALL);
-			ep->halted = true;
+			vita_udc_ep_stall(ep);
 			ep->wedged = wedge;
 		}
 	} else {
