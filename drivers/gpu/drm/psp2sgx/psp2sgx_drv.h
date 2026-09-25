@@ -145,6 +145,11 @@ static inline u32 *psp2sgx_hostctl(struct psp2sgx_device *sgx)
 	return (u32 *)((u8 *)sgx->kregion + SGX_MK_HOSTCTL);
 }
 
+static inline u32 *psp2sgx_hostpost(struct psp2sgx_device *sgx)
+{
+	return (u32 *)((u8 *)sgx->kregion + SGX_MK_HOSTPOST);
+}
+
 /* USSE instructions as the GPU reads them: low word first */
 static inline void psp2sgx_put_code(void *dst, const u64 *code, u32 n)
 {

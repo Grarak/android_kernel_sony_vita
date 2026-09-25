@@ -34,6 +34,7 @@ int sgx_mk_build(u64 *code, u32 cap, u32 *len, u32 kregion_va)
 {
 	struct sgx_usse_asm as, *a = &as;
 	int unlock_exit = 0, exit = 0;
+	unsigned int i;
 
 	sgx_usse_init(a, code, cap, 0);
 	unlock_exit = sgx_usse_label(a);
@@ -43,31 +44,43 @@ int sgx_mk_build(u64 *code, u32 cap, u32 *len, u32 kregion_va)
 	sgx_usse_limm(a, SGX_USSE_ALWAYS, HC, kregion_va + SGX_MK_HOSTCTL);
 
 	/*
-	 * Claim the posted job.  Other events can start the event program
-	 * too, so two microkernel threads may run at once; the mutex makes
-	 * the check and the claim one step.
+	 * Claim the posted run: the host's post differs from the last one
+	 * taken.  Other events can start the event program too, so two
+	 * microkernel threads may run at once; the mutex makes the check and
+	 * the claim one step.  The post is read from the host's own block
+	 * (r16, job code scratch until the call): a post in this block could
+	 * be lost, when a run started by an event (the TA or 3D end the host
+	 * had just polled for) cached the old line and dirtied it with its run
+	 * count, and the host's SLC flush wrote it back over the post (on the
+	 * DevKit: kicks answered by nothing, "state 0" at the job timeout).
 	 */
 	sgx_usse_lock(a, 7);
+	sgx_usse_limm(a, SGX_USSE_ALWAYS, R(16), kregion_va + SGX_MK_HOSTPOST);
 	sgx_usse_ld(a, SGX_USSE_ALWAYS, R(1), HC, IMM(SGX_HC_RUNS), 0);
-	sgx_usse_ld(a, SGX_USSE_ALWAYS, R(2), HC, IMM(SGX_HC_STATE), 0);
+	sgx_usse_ld(a, SGX_USSE_ALWAYS, R(2), HC, IMM(SGX_HC_CLAIMED), 0);
+	sgx_usse_ld(a, SGX_USSE_ALWAYS, R(3), R(16), IMM(SGX_HP_POSTED), 0);
 	sgx_usse_wdf(a, 0);
 	sgx_usse_add(a, SGX_USSE_ALWAYS, R(1), R(1), IMM(1));
 	sgx_usse_st(a, SGX_USSE_ALWAYS, HC, IMM(SGX_HC_RUNS), R(1));
 	sgx_usse_test(a, SGX_USSE_ALWAYS, 0, SGX_USSE_TST_XOR, SGX_USSE_ZERO,
-		      R(2), IMM(SGX_MK_PENDING));
-	sgx_usse_ba(a, SGX_USSE_NOT_P0, unlock_exit);
+		      R(2), R(3));
+	sgx_usse_ba(a, SGX_USSE_P0, unlock_exit);
+	sgx_usse_st(a, SGX_USSE_ALWAYS, HC, IMM(SGX_HC_CLAIMED), R(3));
 	sgx_usse_limm(a, SGX_USSE_ALWAYS, R(2), SGX_MK_RUNNING);
 	sgx_usse_st(a, SGX_USSE_ALWAYS, HC, IMM(SGX_HC_STATE), R(2));
+	/* a fresh error and fresh wait diagnostics for this run */
 	sgx_usse_limm(a, SGX_USSE_ALWAYS, R(2), 0);
 	sgx_usse_st(a, SGX_USSE_ALWAYS, HC, IMM(SGX_HC_ERROR), R(2));
+	for (i = SGX_HC_DIAG_TA; i < SGX_HC_WORDS; i++)
+		sgx_usse_st(a, SGX_USSE_ALWAYS, HC, IMM(i), R(2));
 	sgx_usse_idf(a, 0);
 	sgx_usse_wdf(a, 0);
 	sgx_usse_release(a, 7);
 
 	sgx_usse_call_index(a, SGX_USSE_ALWAYS, SGX_MK_JOB_INDEX);
 
-	/* Done: publish the sequence number, go idle, interrupt the host. */
-	sgx_usse_ld(a, SGX_USSE_ALWAYS, R(1), HC, IMM(SGX_HC_JOB_SEQNO), 0);
+	/* Done: publish the claimed post, go idle, interrupt the host. */
+	sgx_usse_ld(a, SGX_USSE_ALWAYS, R(1), HC, IMM(SGX_HC_CLAIMED), 0);
 	sgx_usse_wdf(a, 0);
 	sgx_usse_st(a, SGX_USSE_ALWAYS, HC, IMM(SGX_HC_DONE_SEQNO), R(1));
 	sgx_usse_limm(a, SGX_USSE_ALWAYS, R(2), SGX_MK_IDLE);

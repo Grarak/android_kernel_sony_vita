@@ -27,10 +27,16 @@
 #define SGX_KREGION_VA		0x00400000u
 #define SGX_KREGION_SPAN	0x00400000u
 
-/* Offsets in the kernel region */
-#define SGX_MK_HOSTCTL		0x0000	/* host control block, 64 bytes */
+/*
+ * Offsets in the kernel region.  The GPU caches both blocks in its SLC, and
+ * the host flushes that from outside, so a line both sides write can be
+ * written back over the other side's words: the host's post and the
+ * microkernel's state sit in blocks of their own, 1 KiB apart.
+ */
+#define SGX_MK_HOSTCTL		0x0000	/* microkernel's block, 64 bytes */
 #define SGX_MK_EVENT_PDS	0x0100	/* the event PDS program */
 #define SGX_MK_KICKER		0x0200	/* EVENT_KICKER target word */
+#define SGX_MK_HOSTPOST		0x0400	/* host's block: the GPU only reads it */
 #define SGX_MK_CODE		0x1000	/* code base 15 window: microkernel */
 #define SGX_MK_CODE_MAX		512	/* instructions */
 #define SGX_MK_JOB_CODE		0x2000	/* job code, same window */
@@ -43,11 +49,15 @@
 /* Temporaries of a microkernel task, in units of four registers */
 #define SGX_MK_TEMP_UNITS	8
 
-/* Host control block words */
+/*
+ * The microkernel's block.  Only the microkernel writes it while the GPU
+ * runs; the host reads it after an SLC flush, and writes it only at probe
+ * and after a reset, with the GPU idle.
+ */
 enum sgx_mk_hostctl {
-	SGX_HC_STATE,		/* host: PENDING; microkernel: RUNNING, IDLE */
-	SGX_HC_JOB_SEQNO,	/* host: the posted job's sequence number */
-	SGX_HC_DONE_SEQNO,	/* microkernel: the last finished job */
+	SGX_HC_STATE,		/* microkernel: RUNNING, IDLE */
+	SGX_HC_CLAIMED,		/* microkernel: the last post it took */
+	SGX_HC_DONE_SEQNO,	/* microkernel: the last post it finished */
 	SGX_HC_ERROR,		/* microkernel: 0, or SGX_MK_ERR_* | register */
 	SGX_HC_RUNS,		/* microkernel: runs that took the lock */
 	/*
@@ -67,8 +77,13 @@ enum sgx_mk_hostctl {
 	SGX_HC_WORDS = 16,
 };
 
+/* The host's block: the GPU never writes it, so it is never written back */
+enum sgx_mk_hostpost {
+	SGX_HP_POSTED,		/* host: the sequence number of the posted run */
+	SGX_HP_WORDS = 16,
+};
+
 #define SGX_MK_IDLE		0
-#define SGX_MK_PENDING		1
 #define SGX_MK_RUNNING		2
 
 #define SGX_MK_ERR_WAIT_TIMEOUT	0x80000000u

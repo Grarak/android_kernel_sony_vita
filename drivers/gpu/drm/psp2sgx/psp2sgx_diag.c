@@ -54,8 +54,9 @@ void psp2sgx_diag_dump(struct psp2sgx_device *sgx, const char *why)
 	rmb();
 	dev_warn(sgx->dev, "diag %s: kregion dma %pad, page directory %pad, SLC flush %s\n",
 		 why, &sgx->kregion_dma, &sgx->kernel_vm->pd_dma, flush ? "TIMED OUT" : "ok");
-	dev_warn(sgx->dev, "diag %s: hostctl %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x\n",
-		 why, hc[SGX_HC_STATE], hc[SGX_HC_JOB_SEQNO], hc[SGX_HC_DONE_SEQNO],
+	dev_warn(sgx->dev, "diag %s: posted %08x, hostctl %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x\n",
+		 why, psp2sgx_hostpost(sgx)[SGX_HP_POSTED],
+		 hc[SGX_HC_STATE], hc[SGX_HC_CLAIMED], hc[SGX_HC_DONE_SEQNO],
 		 hc[SGX_HC_ERROR], hc[SGX_HC_RUNS], hc[SGX_HC_DIAG_TA], hc[SGX_HC_DIAG_TA + 1],
 		 hc[SGX_HC_DIAG_TA + 2], hc[SGX_HC_DIAG_EVENT], hc[SGX_HC_DIAG_EVENT + 1],
 		 hc[SGX_HC_DIAG_EVENT + 2]);
@@ -115,10 +116,7 @@ int psp2sgx_diag_selftest(struct psp2sgx_device *sgx)
 	unsigned int us;
 
 	mutex_lock(&sgx->hw_lock);
-	/* empty the SLC first: a flush after the write could write an old line over it */
-	psp2sgx_hw_slc_flush(sgx);
-	WRITE_ONCE(hc[SGX_HC_STATE], SGX_MK_IDLE);
-	wmb();
+	/* nothing is posted at probe (both blocks are zero); the run only counts */
 	psp2sgx_hw_slc_flush(sgx);
 	psp2sgx_hw_invalidate_caches(sgx);
 	rmb();

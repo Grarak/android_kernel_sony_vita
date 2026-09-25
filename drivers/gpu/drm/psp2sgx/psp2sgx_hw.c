@@ -409,7 +409,17 @@ int psp2sgx_hw_reset(struct psp2sgx_device *sgx)
 	sgx_write(sgx, SGX_SOFT_RESET, 0);
 	wmb();
 	udelay(10);
+	/*
+	 * A post the hung job left unclaimed must not run on the next event:
+	 * mark it taken and done.  The GPU is idle, so the host may write the
+	 * microkernel's block; the SLC is emptied around it so no old line of
+	 * the block is written back over it or read in its place.
+	 */
+	psp2sgx_hw_slc_flush(sgx);
+	WRITE_ONCE(hc[SGX_HC_CLAIMED], READ_ONCE(psp2sgx_hostpost(sgx)[SGX_HP_POSTED]));
+	WRITE_ONCE(hc[SGX_HC_DONE_SEQNO], hc[SGX_HC_CLAIMED]);
 	WRITE_ONCE(hc[SGX_HC_STATE], SGX_MK_IDLE);
 	wmb();
+	psp2sgx_hw_slc_flush(sgx);
 	return psp2sgx_hw_init(sgx);
 }

@@ -510,38 +510,35 @@ static void finish_job(struct psp2sgx_device *sgx, struct psp2sgx_job *job, int 
 static void kick_code(struct psp2sgx_device *sgx, struct psp2sgx_job *job,
 		      const struct psp2sgx_step *s, bool first)
 {
-	u32 *hc = psp2sgx_hostctl(sgx);
-	unsigned int i;
+	u32 *post = psp2sgx_hostpost(sgx);
 
-	/*
-	 * Empty the SLC before touching the host control block.  The
-	 * microkernel runs on every event, also after the job's completion
-	 * interrupt, and its run count store leaves the block's line dirty in
-	 * the SLC with the old state.  A flush after the writes below wrote
-	 * that line back over them: on the DevKit job 2 read "idle, job 1"
-	 * and timed out (2026-09-24).
-	 */
-	if (psp2sgx_hw_slc_flush(sgx))
-		dev_warn_ratelimited(sgx->dev, "SLC flush timed out\n");
 	psp2sgx_put_code((u8 *)sgx->kregion + SGX_MK_JOB_CODE, job->code + s->start,
 			 s->len);
 	WRITE_ONCE(job->kick, ++sgx->kick_seqno);
-	WRITE_ONCE(hc[SGX_HC_JOB_SEQNO], job->kick);
-	WRITE_ONCE(hc[SGX_HC_ERROR], 0);
-	for (i = SGX_HC_DIAG_TA; i < SGX_HC_WORDS; i++)
-		WRITE_ONCE(hc[i], 0);
-	wmb();
-	WRITE_ONCE(hc[SGX_HC_STATE], SGX_MK_PENDING);
 	if (first) {
 		psp2sgx_hw_wait_cores_idle(sgx, job->seqno);
 		psp2sgx_hw_set_vm(sgx, job->vm);
 	}
 	/*
 	 * The GPU must see the code, the job and the tables, not stale lines;
-	 * every run of a job has its code at the same address.
+	 * every run of a job has its code at the same address.  Any run of the
+	 * microkernel takes a post it sees, also one an event started (a TA or
+	 * 3D end the host just polled for), so the post goes out only once all
+	 * of that is in place.
 	 */
 	if (psp2sgx_hw_slc_flush(sgx) || psp2sgx_hw_invalidate_caches(sgx))
 		dev_warn_ratelimited(sgx->dev, "cache maintenance timed out\n");
+	WRITE_ONCE(post[SGX_HP_POSTED], job->kick);
+	wmb();
+	/*
+	 * Drop a clean copy of the old post a run took into the SLC meanwhile.
+	 * The GPU never writes this block, so the flush cannot write anything
+	 * over the post.  The host's words in the microkernel's block were
+	 * written over that way (on the DevKit the block read back "idle,
+	 * the previous job" at the job's timeout).
+	 */
+	if (psp2sgx_hw_slc_flush(sgx))
+		dev_warn_ratelimited(sgx->dev, "SLC flush timed out\n");
 	psp2sgx_hw_kick(sgx);
 }
 
@@ -897,11 +894,12 @@ static enum drm_gpu_sched_stat psp2sgx_timedout_job(struct drm_sched_job *sched_
 	spin_unlock_irqrestore(&sgx->fence_lock, flags);
 	cancel_work_sync(&sgx->step_work);
 
-	dev_err(sgx->dev, "job %u timed out at step %u of %u: state %u done %u error %#x runs %u, EVENT_STATUS %#x\n",
-		job->seqno, job->step, job->nr_steps,
-		READ_ONCE(hc[SGX_HC_STATE]), READ_ONCE(hc[SGX_HC_DONE_SEQNO]),
-		READ_ONCE(hc[SGX_HC_ERROR]), READ_ONCE(hc[SGX_HC_RUNS]),
-		sgx_read(sgx, SGX_EVENT_STATUS));
+	dev_err(sgx->dev, "job %u timed out at step %u of %u: kick %u posted %u, state %u claimed %u done %u error %#x runs %u, EVENT_STATUS %#x\n",
+		job->seqno, job->step, job->nr_steps, READ_ONCE(job->kick),
+		READ_ONCE(psp2sgx_hostpost(sgx)[SGX_HP_POSTED]),
+		READ_ONCE(hc[SGX_HC_STATE]), READ_ONCE(hc[SGX_HC_CLAIMED]),
+		READ_ONCE(hc[SGX_HC_DONE_SEQNO]), READ_ONCE(hc[SGX_HC_ERROR]),
+		READ_ONCE(hc[SGX_HC_RUNS]), sgx_read(sgx, SGX_EVENT_STATUS));
 	if (sgx->timeouts_dumped < 2) {
 		sgx->timeouts_dumped++;
 		mutex_lock(&sgx->hw_lock);
