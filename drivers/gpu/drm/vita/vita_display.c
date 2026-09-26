@@ -973,11 +973,14 @@ static const struct drm_display_mode vita_oled_mode = {
 	.height_mm = 63,
 };
 
+/*
+ * The plane is merged over the blank plane a with a constant alpha (merge
+ * setting 2, alpha b 0x100), so pixel alpha is not used and only the X
+ * formats are offered.
+ */
 static const u32 vita_plane_formats[] = {
 	DRM_FORMAT_XBGR8888,
-	DRM_FORMAT_ABGR8888,
 	DRM_FORMAT_XRGB8888,
-	DRM_FORMAT_ARGB8888,
 };
 
 static int vita_plane_atomic_check(struct drm_plane *plane, struct drm_atomic_commit *state)
@@ -1011,7 +1014,6 @@ static void vita_plane_atomic_update(struct drm_plane *plane, struct drm_atomic_
 	}
 	switch (fb->format->format) {
 	case DRM_FORMAT_XRGB8888:
-	case DRM_FORMAT_ARGB8888:
 		format = IFTU_FMT_BGRA;
 		break;
 	default:
