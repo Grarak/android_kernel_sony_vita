@@ -67,6 +67,11 @@
 	memory-region = <&cdram_fb>;
 };
 
+/* The CP board's debug SDIO link: the PC's read-only monitor (vita-dbgmon) */
+&debug_sdio {
+	status = "okay";
+};
+
 /*
  * The mini-USB port, bus 1. Android's USB function stays on the
  * multi-connector (sys.usb.controller e40d0000.usb); this one is a second

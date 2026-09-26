@@ -546,6 +546,21 @@
 			status = "disabled";
 		};
 
+		/*
+		 * SceSDbgSdio's debug SDIO controller: the device end of the
+		 * DevKit CP board's SDIO card, unit 0, four channels [RE
+		 * SceSDbgSdio, the CP board's sce_sdio.ko]. The Vita OS
+		 * polls it and so does vita-dbgmon, the read-only monitor that
+		 * serves the PC through the CP; sony,display is the head whose
+		 * scanout it reports. Only a DevKit has the CP board.
+		 */
+		debug_sdio: debug-sdio@e5800000 {
+			compatible = "sony,vita-debug-sdio";
+			reg = <0xe5800000 0x10000>;
+			sony,display = <&display>;
+			status = "disabled";
+		};
+
 		/* SceSpi0 (Syscon) [WIKI SPI_Registers]; ScePervasiveReset +0x104 */
 		spi0: spi@e0a00000 {
 			compatible = "vita,spi";

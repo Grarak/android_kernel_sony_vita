@@ -568,6 +568,19 @@ config MCHP_LAN966X_PCI
 	    - lan966x-miim (MDIO_MSCC_MIIM)
 	    - lan966x-switch (LAN966X_SWITCH)
 
+config VITA_DBGMON
+	bool "PlayStation Vita DevKit debug monitor on the CP board link"
+	depends on ARCH_VITA || COMPILE_TEST
+	depends on OF && HAS_IOMEM
+	help
+	  Serves read-only debug requests from the PC through the DevKit's
+	  CP board: the Vita's debug SDIO controller (0xE5800000) presents a
+	  card to the CP, registers the bare-metal monitor's DECI4p protocol
+	  0x00BE0000 with the CP's relay dfcpm, and answers HELLO, READ (System
+	  RAM and the reserved/framebuffer carve-outs) and FB (the scanned-out
+	  framebuffer). A PC-side client on the DECI link uses
+	  it. Only useful on a DevKit with its CP board.
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
