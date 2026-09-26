@@ -40,17 +40,31 @@
 };
 
 &reserved_memory {
-	/* The boot loader's 960x544x4 framebuffer, rounded up to 2 MiB */
+	/*
+	 * Scanout: the boot loader's 960x544x4 framebuffer at its start
+	 * (simple-framebuffer), or the display driver's buffers (eight
+	 * 960x544x4 buffers, each taking 2 MiB of the pool).
+	 */
 	cdram_fb: framebuffer@20000000 {
-		reg = <0x20000000 0x200000>;
+		compatible = "shared-dma-pool";
+		reg = <0x20000000 0x1000000>;
 		no-map;
 	};
 
 	/* The rest of CDRAM: the GPU's buffer objects */
-	cdram_gpu: gpu-memory@20200000 {
-		reg = <0x20200000 0x7e00000>;
+	cdram_gpu: gpu-memory@21000000 {
+		reg = <0x21000000 0x7000000>;
 		no-map;
 	};
+};
+
+/*
+ * The OLED head. Disabled here: the boot loader enables it and removes the
+ * simple-framebuffer for vita.display=native, and enables it next to the
+ * simple-framebuffer for vita.display=handover.
+ */
+&display {
+	memory-region = <&cdram_fb>;
 };
 
 /*

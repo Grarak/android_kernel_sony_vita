@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config DRM_VITA
+	tristate "PlayStation Vita display (OLED head)"
+	depends on DRM && OF
+	depends on ARM || COMPILE_TEST
+	select BACKLIGHT_CLASS_DEVICE
+	select DRM_CLIENT_SELECTION
+	select DRM_KMS_HELPER
+	select DRM_GEM_DMA_HELPER
+	help
+	  KMS driver for the display of the Sony PlayStation Vita PCH-1000
+	  and DevKit: the DSI0 link, the IFTU0 compositor, the display
+	  clocks and the OLED panel on SPI2, brought up the way the Vita OS
+	  does. Scanout buffers come from a CDRAM memory-region.

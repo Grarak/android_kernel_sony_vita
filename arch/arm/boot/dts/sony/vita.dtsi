@@ -520,6 +520,32 @@
 			status = "disabled";
 		};
 
+		/*
+		 * The OLED head: DSI0 (GIC ID 213), IFTU0 planes a/b and their
+		 * control block, the panel's SPI2 and the Pervasive words of
+		 * the display clocks, resets and DSI PLL [RE SceDsi, SceIftu,
+		 * SceOled]. Panel supply: GPIO0 port 0 [RE oled.skprx 3.65].
+		 * A model's DTS adds the scanout memory-region; the boot loader
+		 * sets the status.
+		 */
+		display: display@e5050000 {
+			compatible = "sony,vita-display";
+			reg = <0xe5050000 0x1000>,
+			      <0xe5020000 0x1000>,
+			      <0xe5021000 0x1000>,
+			      <0xe5022000 0x1000>,
+			      <0xe0a20000 0x1000>,
+			      <0xe3100000 0x1000>,
+			      <0xe3101000 0x1000>,
+			      <0xe3102000 0x1000>,
+			      <0xe3103000 0x1000>;
+			reg-names = "dsi", "iftu-a", "iftu-b", "iftu-ctl", "spi",
+				    "misc", "reset", "gate", "baseclk";
+			interrupts = <GIC_SPI 181 IRQ_TYPE_LEVEL_HIGH>;	/* ID 213 */
+			power-gpios = <&gpio0 0 GPIO_ACTIVE_HIGH>;
+			status = "disabled";
+		};
+
 		/* SceSpi0 (Syscon) [WIKI SPI_Registers]; ScePervasiveReset +0x104 */
 		spi0: spi@e0a00000 {
 			compatible = "vita,spi";
