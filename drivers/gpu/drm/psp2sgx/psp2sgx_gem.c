@@ -93,11 +93,11 @@ int psp2sgx_bo_map_get(struct psp2sgx_bo *bo, struct psp2sgx_vm *vm, u32 *va)
 	if (!err) {
 		if (sgt)
 			err = psp2sgx_vm_map_sgt(vm, m->node.start, sgt,
-						 obj->size, 0);
+						 obj->size, psp2sgx_pte_flags());
 		else
 			err = psp2sgx_vm_map_contig(vm, m->node.start,
 						    to_psp2sgx_cdram_bo(obj)->node.start,
-						    obj->size, 0);
+						    obj->size, psp2sgx_pte_flags());
 		if (err)
 			drm_mm_remove_node(&m->node);
 	}

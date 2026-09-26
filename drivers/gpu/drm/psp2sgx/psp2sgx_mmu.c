@@ -20,6 +20,23 @@
 
 #include "psp2sgx_drv.h"
 
+/*
+ * Sony's microkernel maps every page it writes CACHECONSISTENT (PTE flags 0x9
+ * and 0x19) and sets MASTER_SLC_CTRL_BYPASS BYP_CC, as psp2sgx does; gpuinit
+ * reads those stores without an SLC flush.  So cache-consistent pages most
+ * likely bypass the SLC (Sony keeps the microkernel's writes out of the
+ * SLC).  With pte_cc every mapping here gets the bit.  Inferred,
+ * not measured, hence off by default.
+ */
+static bool pte_cc;
+module_param(pte_cc, bool, 0444);
+MODULE_PARM_DESC(pte_cc, "Map GPU memory CACHECONSISTENT, past the SLC (default: false)");
+
+u32 psp2sgx_pte_flags(void)
+{
+	return pte_cc ? SGX_MMU_PTE_CACHECONSISTENT : 0;
+}
+
 static void *table_alloc(struct psp2sgx_device *sgx, dma_addr_t *dma)
 {
 	void *t = dma_alloc_wc(sgx->dev, SGX_MMU_PAGE_SIZE, dma, GFP_KERNEL);
@@ -54,7 +71,8 @@ int psp2sgx_kregion_init(struct psp2sgx_device *sgx)
 	 */
 	for (n = 0; n < sgx->kregion_size >> SGX_MMU_PAGE_SHIFT; n++)
 		sgx->kregion_pt[(SGX_KREGION_VA >> SGX_MMU_PAGE_SHIFT) % SGX_MMU_ENTRIES + n] =
-			(sgx->kregion_dma + (n << SGX_MMU_PAGE_SHIFT)) | SGX_MMU_PTE_VALID;
+			(sgx->kregion_dma + (n << SGX_MMU_PAGE_SHIFT)) | SGX_MMU_PTE_VALID |
+			psp2sgx_pte_flags();
 
 	sgx->kernel_vm = psp2sgx_vm_create(sgx);
 	if (IS_ERR(sgx->kernel_vm)) {

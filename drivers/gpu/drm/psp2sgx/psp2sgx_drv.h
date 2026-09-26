@@ -214,6 +214,7 @@ static inline struct psp2sgx_vm *psp2sgx_vm_get(struct psp2sgx_vm *vm)
 	kref_get(&vm->ref);
 	return vm;
 }
+u32 psp2sgx_pte_flags(void);
 int psp2sgx_vm_map_sgt(struct psp2sgx_vm *vm, u32 va, struct sg_table *sgt,
 		       size_t size, u32 flags);
 int psp2sgx_vm_map_contig(struct psp2sgx_vm *vm, u32 va, phys_addr_t pa,
