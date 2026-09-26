@@ -21,12 +21,12 @@
  *            on, PLL off, panel supply off.
  *
  * Vblank is the DSI's frame interrupt (+0x050 bit 1, GIC ID 213); IFTU banks
- * latch on it. Scanout is IFTU0 plane b over a blank plane a with merge
- * setting 2, as SceShell has it; flips write the plane's idle bank and select
- * it. Buffers come from a CDRAM carve-out (memory-region).
+ * latch on it. A cold head scans plane b over a blank plane a with merge
+ * setting 2; handover scans the boot loader's active plane a. Flips write the
+ * idle bank and select it. Buffers come from a CDRAM carve-out (memory-region).
  *
- * If the boot loader left the head running (gate +0x80 set), the driver takes
- * the head down the same way first and brings it up from scratch.
+ * If the boot loader left the head running (gate +0x80 set), KMS adopts its
+ * active plane without interrupting the DSI clock or reinitializing IFTU.
  */
 
 #include <linux/aperture.h>
@@ -177,6 +177,8 @@ struct vita_display {
 	unsigned int row;		/* current gamma row */
 
 	int last_bank[2];		/* SceIftu's last written bank per plane */
+	int scanout_plane;
+	bool handover_pending;
 };
 
 static inline struct vita_display *to_vd(struct drm_device *drm)
@@ -974,9 +976,9 @@ static const struct drm_display_mode vita_oled_mode = {
 };
 
 /*
- * The plane is merged over the blank plane a with a constant alpha (merge
- * setting 2, alpha b 0x100), so pixel alpha is not used and only the X
- * formats are offered.
+ * The driver does not use per-pixel alpha: a cold head scans plane b with
+ * merge setting 2, while handover scans the boot loader's already active
+ * plane a. Only X formats are offered.
  */
 static const u32 vita_plane_formats[] = {
 	DRM_FORMAT_XBGR8888,
@@ -1009,7 +1011,7 @@ static void vita_plane_atomic_update(struct drm_plane *plane, struct drm_atomic_
 	u32 format;
 
 	if (!new->visible || !fb) {
-		vita_iftu_flip(vd, PLANE_B, 0, 0, 0);
+		vita_iftu_flip(vd, vd->scanout_plane, 0, 0, 0);
 		return;
 	}
 	switch (fb->format->format) {
@@ -1020,7 +1022,7 @@ static void vita_plane_atomic_update(struct drm_plane *plane, struct drm_atomic_
 		format = IFTU_FMT_RGBA;
 		break;
 	}
-	vita_iftu_flip(vd, PLANE_B, drm_fb_dma_get_gem_addr(fb, new, 0), format,
+	vita_iftu_flip(vd, vd->scanout_plane, drm_fb_dma_get_gem_addr(fb, new, 0), format,
 		       fb->pitches[0] - OLED_WIDTH * 4);
 }
 
@@ -1034,7 +1036,7 @@ static void vita_plane_atomic_disable(struct drm_plane *plane, struct drm_atomic
 		return;
 	crtc_state = drm_atomic_get_new_crtc_state(state, old->crtc);
 	if (crtc_state && crtc_state->active)
-		vita_iftu_flip(vd, PLANE_B, 0, 0, 0);
+		vita_iftu_flip(vd, vd->scanout_plane, 0, 0, 0);
 }
 
 
@@ -1066,7 +1068,13 @@ static void vita_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_atomic_com
 {
 	struct vita_display *vd = to_vd(crtc->dev);
 
-	vita_head_enable(vd);
+	if (vd->handover_pending) {
+		vd->handover_pending = false;
+		drm_info(&vd->drm, "adopting the boot loader's active IFTU plane\n");
+	} else {
+		vd->scanout_plane = PLANE_B;
+		vita_head_enable(vd);
+	}
 	drm_crtc_vblank_on(crtc);
 }
 
@@ -1137,7 +1145,10 @@ static const struct drm_crtc_funcs vita_crtc_funcs = {
 static void vita_encoder_atomic_enable(struct drm_encoder *encoder,
 				       struct drm_atomic_commit *state)
 {
-	vita_panel_on(to_vd(encoder->dev));
+	struct vita_display *vd = to_vd(encoder->dev);
+
+	if (!vd->panel_on)
+		vita_panel_on(vd);
 }
 
 static void vita_encoder_atomic_disable(struct drm_encoder *encoder,
@@ -1263,8 +1274,8 @@ static void vita_release_reserved(void *dev)
 
 /*
  * The panel's DDB, read as SceOled does at module start, with its supply on
- * for the read only if it was off. A head the boot loader left running is
- * then taken down (display off first).
+ * for the read only if it was off. Preserve a running head for the first KMS
+ * commit rather than tearing down a display the boot loader already started.
  */
 static void vita_display_take_over(struct vita_display *vd)
 {
@@ -1287,16 +1298,11 @@ static void vita_display_take_over(struct vita_display *vd)
 	mutex_unlock(&vd->panel_lock);
 
 	if (running) {
-		drm_info(&vd->drm, "taking over the head the boot loader started\n");
-		vita_panel_off(vd);
-		vita_head_disable(vd);
-		/*
-		 * The boot loader enables the plane CSC (+0x100 = 1) with its own
-		 * matrices; SceIftu never writes +0x100, so it is left as the
-		 * OS finds it after a reset (inferred to be 0).
-		 */
-		writel(0, vd->iftu[PLANE_A] + 0x100);
-		writel(0, vd->iftu[PLANE_B] + 0x100);
+		drm_info(&vd->drm, "preserving the head the boot loader started\n");
+		vd->handover_pending = true;
+		vd->scanout_plane = PLANE_A;
+		vd->last_bank[PLANE_A] = (readl(vd->iftu[PLANE_A] + IFTU_BANK_LIVE) >> 1) & 1;
+		vd->panel_on = true;
 	}
 }
 
@@ -1320,6 +1326,7 @@ static int vita_display_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	vd->row = OLED_DEFAULT_ROW;
+	vd->scanout_plane = PLANE_B;
 
 	vd->dsi = devm_platform_ioremap_resource_byname(pdev, "dsi");
 	vd->iftu[PLANE_A] = devm_platform_ioremap_resource_byname(pdev, "iftu-a");
@@ -1359,10 +1366,9 @@ static int vita_display_probe(struct platform_device *pdev)
 
 	vd->soc_rev = readl(vd->misc + MISC_SOC_REV);
 	vita_display_take_over(vd);
-
-	ret = devm_request_irq(dev, vd->irq, vita_dsi_irq, 0, "vita-dsi0", vd);
-	if (ret)
-		return ret;
+	writel(0, vd->dsi + DSI_INT_ENABLE);
+	writel(readl(vd->dsi + DSI_INT_STATUS), vd->dsi + DSI_INT_STATUS);
+	readl(vd->dsi + DSI_INT_STATUS);
 
 	vd->backlight = devm_backlight_device_register(dev, "vita-oled", dev, vd,
 						       &vita_backlight_ops, &props);
@@ -1370,6 +1376,9 @@ static int vita_display_probe(struct platform_device *pdev)
 		return PTR_ERR(vd->backlight);
 
 	ret = vita_modeset_init(vd);
+	if (ret)
+		return ret;
+	ret = devm_request_irq(dev, vd->irq, vita_dsi_irq, 0, "vita-dsi0", vd);
 	if (ret)
 		return ret;
 	ret = drm_dev_register(&vd->drm, 0);
